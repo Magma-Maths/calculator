@@ -174,19 +174,6 @@ async def execute(req: ExecuteRequest, request: Request):
 
 
 if __name__ == "__main__":
-    import os
     import uvicorn
 
-    ssl_kwargs = {}
-    cert = settings.tls_cert_file
-    key = settings.tls_key_file
-    if os.path.exists(cert) and os.path.exists(key):
-        ssl_kwargs["ssl_certfile"] = cert
-        ssl_kwargs["ssl_keyfile"] = key
-
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=settings.port,
-        **ssl_kwargs,
-    )
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.port)

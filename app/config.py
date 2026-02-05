@@ -13,10 +13,6 @@ class Settings(BaseSettings):
     max_concurrent: int = 4
     port: int = 8080
 
-    # TLS
-    tls_cert_file: str = "/certs/live/calc.magma-maths.org/fullchain.pem"
-    tls_key_file: str = "/certs/live/calc.magma-maths.org/privkey.pem"
-
     # Rate limiting
     rate_limit_per_minute: int = 30
     rate_limit_per_hour: int = 200

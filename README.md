@@ -106,42 +106,29 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
-| `TLS_CERT_FILE` | `/certs/live/calc.magma-maths.org/fullchain.pem` | TLS certificate path |
-| `TLS_KEY_FILE` | `/certs/live/calc.magma-maths.org/privkey.pem` | TLS private key path |
 
 ### 3a. Run with docker-compose (production)
 
 ```bash
+cp .env.example .env
+# Edit .env — set DOMAIN and ACME_EMAIL for your deployment
 docker compose up -d
 ```
 
-This maps port 443 to the container, mounts `/opt/magma` read-only, and mounts `/etc/letsencrypt` for TLS certificates. See `docker-compose.yml` for details.
+Traefik handles TLS termination with automatic Let's Encrypt certificates (HTTP-01 challenge). The `.env` file provides `DOMAIN` and `ACME_EMAIL` for docker compose interpolation. Certificates are stored in the `acme` named volume and renewed automatically. The Traefik dashboard is available on `127.0.0.1:8080`.
 
-### 3b. Run without TLS (testing)
+### 3b. Run without docker-compose (testing)
 
 ```bash
 docker run --rm \
   --cap-add SYS_ADMIN \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
-  -e TLS_CERT_FILE=/nonexistent \
-  -e TLS_KEY_FILE=/nonexistent \
   -p 8080:8080 \
   magma-calculator
 ```
 
-Setting `TLS_CERT_FILE` to a nonexistent path disables TLS — uvicorn will serve plain HTTP.
-
-### 4. TLS certificate renewal
-
-The host runs Certbot for Let's Encrypt certificates. The `/etc/letsencrypt/` directory is mounted into the container as `/certs:ro`, and uvicorn reads the cert files directly.
-
-After renewal, the container must restart to pick up new certs. Install the post-renewal hook:
-
-```bash
-cp deploy/certbot-renew-hook.sh /etc/letsencrypt/renewal-hooks/post/restart-calculator.sh
-chmod +x /etc/letsencrypt/renewal-hooks/post/restart-calculator.sh
-```
+This runs the calculator on plain HTTP (port 8080) without Traefik or TLS.
 
 ### Running multiple instances
 

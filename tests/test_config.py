@@ -20,8 +20,6 @@ def test_default_settings():
     assert settings.allowed_origin == "*"
     assert settings.turnstile_enabled is False
     assert settings.turnstile_secret_key == ""
-    assert settings.tls_cert_file == "/certs/live/calc.magma-maths.org/fullchain.pem"
-    assert settings.tls_key_file == "/certs/live/calc.magma-maths.org/privkey.pem"
 
 
 def test_settings_from_env(monkeypatch):
