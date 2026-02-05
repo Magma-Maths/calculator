@@ -1,27 +1,4 @@
 services:
-  traefik:
-    image: traefik:v3.3
-    container_name: traefik
-    command:
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --entrypoints.web.http.redirections.entryPoint.to=websecure
-      - --providers.docker=true
-      - --providers.docker.exposedByDefault=false
-      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
-      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
-      - --certificatesresolvers.le.acme.storage=/acme/acme.json
-      - --api.dashboard=true
-      - --api.insecure=true
-    ports:
-      - "80:80"
-      - "443:443"
-      - "127.0.0.1:8080:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - acme:/acme
-    restart: unless-stopped
-
   calculator:
     build: .
     container_name: magma-calculator
@@ -41,7 +18,10 @@ services:
       - traefik.http.routers.calculator.entrypoints=websecure
       - traefik.http.routers.calculator.tls.certresolver=le
       - traefik.http.services.calculator.loadbalancer.server.port=8080
+    networks:
+      - traefik
     restart: unless-stopped
 
-volumes:
-  acme:
+networks:
+  traefik:
+    external: true

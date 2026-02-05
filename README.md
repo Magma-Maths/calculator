@@ -107,17 +107,29 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 
-### 3a. Run with docker-compose (production)
+### 3a. Start Traefik (once per host)
+
+Traefik runs as a shared reverse proxy. If you already have a Traefik instance on the host, skip this step — just make sure its Docker network is named `traefik`.
 
 ```bash
-cp .env.example .env
-# Edit .env — set DOMAIN and ACME_EMAIL for your deployment
+cd traefik
+cp .env.example .env   # edit ACME_EMAIL
+docker compose up -d
+cd ..
+```
+
+This creates the `traefik` Docker network, binds ports 80/443, and handles Let's Encrypt certificates automatically. The dashboard is available on `127.0.0.1:8080`.
+
+### 3b. Run with docker-compose (production)
+
+```bash
+cp .env.example .env   # edit DOMAIN
 docker compose up -d
 ```
 
-Traefik handles TLS termination with automatic Let's Encrypt certificates (HTTP-01 challenge). The `.env` file provides `DOMAIN` and `ACME_EMAIL` for docker compose interpolation. Certificates are stored in the `acme` named volume and renewed automatically. The Traefik dashboard is available on `127.0.0.1:8080`.
+The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it.
 
-### 3b. Run without docker-compose (testing)
+### 3c. Run without docker-compose (testing)
 
 ```bash
 docker run --rm \
