@@ -12,7 +12,7 @@ def test_default_settings():
     assert settings.port == 8080
     assert settings.rate_limit_per_minute == 30
     assert settings.rate_limit_per_hour == 200
-    assert settings.allowed_origin == "https://magma-maths.org,http://localhost"
+    assert settings.allowed_origin == "*"
     assert settings.turnstile_enabled is False
     assert settings.turnstile_secret_key == ""
     assert settings.tls_cert_file == "/certs/live/calc.magma-maths.org/fullchain.pem"
@@ -30,6 +30,13 @@ def test_settings_from_env(monkeypatch):
 
 
 def test_allowed_origins_list():
+    settings = Settings()
+    origins = settings.allowed_origins_list
+    assert "*" in origins
+
+
+def test_allowed_origins_list_custom(monkeypatch):
+    monkeypatch.setenv("ALLOWED_ORIGIN", "https://magma-maths.org,http://localhost")
     settings = Settings()
     origins = settings.allowed_origins_list
     assert "https://magma-maths.org" in origins

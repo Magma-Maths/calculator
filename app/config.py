@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     rate_limit_per_hour: int = 200
 
     # CORS
-    allowed_origin: str = "https://magma-maths.org,http://localhost"
+    allowed_origin: str = "*"
 
     # Optional Turnstile
     turnstile_enabled: bool = False

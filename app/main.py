@@ -42,14 +42,18 @@ async def _periodic_cleanup():
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
-# Custom CORS origin check: allow http://localhost with any port
+# CORS configuration
+_allow_all_origins = "*" in settings.allowed_origins_list
 _allow_localhost = "http://localhost" in settings.allowed_origins_list
 _fixed_origins = [
-    o for o in settings.allowed_origins_list if o != "http://localhost"
+    o for o in settings.allowed_origins_list
+    if o not in ("*", "http://localhost")
 ]
 
 
 def _origin_allowed(origin: str) -> bool:
+    if _allow_all_origins:
+        return True
     if origin in _fixed_origins:
         return True
     if _allow_localhost and re.match(r"^http://localhost(:\d+)?$", origin):
@@ -67,7 +71,7 @@ async def cors_middleware(request: Request, call_next):
                 content="",
                 status_code=200,
                 headers={
-                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Origin": origin or "*",
                     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
                     "Access-Control-Allow-Headers": "*",
                     "Access-Control-Max-Age": "3600",
@@ -77,7 +81,9 @@ async def cors_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
-    if origin and _origin_allowed(origin):
+    if _allow_all_origins:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    elif origin and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
 

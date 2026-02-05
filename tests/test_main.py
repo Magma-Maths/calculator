@@ -70,29 +70,27 @@ def test_execute_timeout(mock_exec, client):
     assert any("time limit" in w for w in data["warnings"])
 
 
-def test_cors_preflight(client):
+def test_cors_preflight_allows_any_origin(client):
     resp = client.options(
         "/execute",
         headers={
-            "Origin": "https://magma-maths.org",
+            "Origin": "https://example.com",
             "Access-Control-Request-Method": "POST",
         },
     )
     assert resp.status_code == 200
-    assert "https://magma-maths.org" in resp.headers.get(
-        "access-control-allow-origin", ""
+    assert resp.headers.get("access-control-allow-origin") == "https://example.com"
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_cors_response_allows_all(mock_exec, client):
+    mock_exec.return_value = ExecutionResult(
+        stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0,
     )
-
-
-def test_cors_localhost_any_port(client):
-    resp = client.options(
+    resp = client.post(
         "/execute",
-        headers={
-            "Origin": "http://localhost:5000",
-            "Access-Control-Request-Method": "POST",
-        },
+        json={"code": "print 1;"},
+        headers={"Origin": "https://example.com"},
     )
     assert resp.status_code == 200
-    assert "http://localhost:5000" in resp.headers.get(
-        "access-control-allow-origin", ""
-    )
+    assert resp.headers.get("access-control-allow-origin") == "*"
