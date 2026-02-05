@@ -1,0 +1,16 @@
+services:
+  calculator:
+    build: .
+    container_name: magma-calculator
+    cap_add:
+      - SYS_ADMIN
+    tmpfs:
+      - /tmp:size=128m
+    volumes:
+      - /opt/magma:/opt/magma:ro
+      - /etc/letsencrypt:/certs:ro
+    env_file:
+      - calculator.env
+    ports:
+      - "443:8080"
+    restart: unless-stopped
