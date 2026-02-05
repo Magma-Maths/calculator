@@ -4,6 +4,8 @@ import json
 import re
 import time
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -23,13 +25,25 @@ semaphore = asyncio.Semaphore(settings.max_concurrent)
 logger = logging.getLogger("calculator")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-app = FastAPI(docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_periodic_cleanup())
+    yield
+    task.cancel()
+
+
+async def _periodic_cleanup():
+    while True:
+        await asyncio.sleep(300)
+        rate_limiter.cleanup()
+
+
+app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 # Custom CORS origin check: allow http://localhost with any port
-_localhost_origins = [
-    o for o in settings.allowed_origins_list if o == "http://localhost"
-]
+_allow_localhost = "http://localhost" in settings.allowed_origins_list
 _fixed_origins = [
     o for o in settings.allowed_origins_list if o != "http://localhost"
 ]
@@ -38,7 +52,7 @@ _fixed_origins = [
 def _origin_allowed(origin: str) -> bool:
     if origin in _fixed_origins:
         return True
-    if _localhost_origins and re.match(r"^http://localhost(:\d+)?$", origin):
+    if _allow_localhost and re.match(r"^http://localhost(:\d+)?$", origin):
         return True
     return False
 
@@ -65,6 +79,7 @@ async def cors_middleware(request: Request, call_next):
 
     if origin and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
 
     return response
 
@@ -98,8 +113,9 @@ async def execute(req: ExecuteRequest, request: Request):
             headers={"Retry-After": "60"},
         )
 
-    # Acquire concurrency slot
-    if semaphore.locked() and semaphore._value == 0:
+    # Try to acquire concurrency slot without blocking
+    acquired = semaphore.locked() is False or semaphore._value > 0
+    if not acquired:
         return JSONResponse(
             status_code=503,
             content={"error": "All execution slots busy"},
@@ -113,7 +129,7 @@ async def execute(req: ExecuteRequest, request: Request):
     stderr_warnings = parse_stderr_warnings(result.stderr)
     all_warnings = parsed.warnings + stderr_warnings
 
-    success = result.exit_code == 0 and not stderr_warnings
+    success = result.exit_code == 0 and not all_warnings
 
     response_data = {
         "success": success,
@@ -129,8 +145,11 @@ async def execute(req: ExecuteRequest, request: Request):
         "warnings": all_warnings,
     }
 
-    if not success and stderr_warnings:
-        response_data["error"] = stderr_warnings[0]
+    if not success:
+        if stderr_warnings:
+            response_data["error"] = stderr_warnings[0]
+        elif parsed.warnings:
+            response_data["error"] = parsed.warnings[0]
 
     elapsed = time.time() - start_time
     logger.info(
@@ -139,6 +158,7 @@ async def execute(req: ExecuteRequest, request: Request):
             "client_ip": client_ip,
             "input_size": len(req.code),
             "elapsed_sec": round(elapsed, 3),
+            "memory_used": parsed.memory,
             "success": success,
             "warnings": all_warnings,
         })

@@ -1,6 +1,4 @@
 import asyncio
-import os
-import tempfile
 from dataclasses import dataclass
 
 from app.config import Settings
@@ -27,45 +25,38 @@ def wrap_magma_code(code: str, timeout: int) -> str:
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     wrapped = wrap_magma_code(code, settings.magma_timeout)
 
-    # Write wrapped code to temp file
-    fd, tmppath = tempfile.mkstemp(suffix=".m", prefix="magma_")
+    cmd = [
+        "nsjail",
+        "--config", "/app/nsjail.cfg",
+        "--time_limit", str(settings.magma_timeout + 1),
+        "--cgroup_mem_max", str(settings.magma_memory_mb * 1024 * 1024),
+        "--rlimit_cpu", str(settings.magma_cpu_timeout),
+        "--", "magma", "-w", "-n",
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(wrapped)
-
-        cmd = [
-            "nsjail",
-            "--config", "/app/nsjail.cfg",
-            "--", "magma", "-w", "-n", tmppath,
-        ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=wrapped.encode("utf-8")),
+            timeout=settings.magma_timeout + 2,
         )
-
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=settings.magma_timeout + 2,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return ExecutionResult(
-                stdout="",
-                stderr="Killed",
-                exit_code=-1,
-            )
-
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
         return ExecutionResult(
-            stdout=stdout_bytes.decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
-            exit_code=proc.returncode or 0,
+            stdout="",
+            stderr="Killed",
+            exit_code=-1,
         )
-    finally:
-        try:
-            os.unlink(tmppath)
-        except OSError:
-            pass
+
+    return ExecutionResult(
+        stdout=stdout_bytes.decode("utf-8", errors="replace"),
+        stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        exit_code=proc.returncode or 0,
+    )

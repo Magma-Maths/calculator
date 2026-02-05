@@ -66,6 +66,7 @@ def test_execute_timeout(mock_exec, client):
     resp = client.post("/execute", json={"code": "while true do end while;"})
     assert resp.status_code == 200
     data = resp.json()
+    assert data["success"] is False
     assert any("time limit" in w for w in data["warnings"])
 
 

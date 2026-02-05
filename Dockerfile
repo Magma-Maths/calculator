@@ -1,5 +1,5 @@
 # Stage 1: Python dependencies
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 WORKDIR /app
 RUN pip install poetry
 COPY pyproject.toml poetry.lock* ./
@@ -16,7 +16,7 @@ RUN git clone https://github.com/google/nsjail.git /nsjail && \
     cd /nsjail && make
 
 # Stage 3: Runtime
-FROM python:3.11-slim
+FROM python:3.12-slim
 WORKDIR /app
 
 # Install nsjail runtime dependencies
@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m calculator
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/local/bin/nsjail
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
