@@ -73,6 +73,8 @@ By default CORS is not enforced — all origins are allowed (`ALLOWED_ORIGIN=*`)
 
 ## Setup
 
+> **First time on a fresh Ubuntu server?** See [DEPLOY.md](DEPLOY.md) for a complete walkthrough.
+
 ### Prerequisites
 
 - **Docker** with support for `--cap-add SYS_ADMIN` (required for nsjail namespace creation)
