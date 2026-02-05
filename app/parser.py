@@ -95,3 +95,16 @@ def _extract_footer(text: str, result: ParseResult) -> None:
     m = _RE_MEMORY.search(text)
     if m:
         result.memory = m.group(1)
+
+
+def parse_stderr_warnings(stderr: str | None) -> list[str]:
+    if not stderr:
+        return []
+    warnings = []
+    if "Alarm clock" in stderr or "Cputime limit exceeded" in stderr or "Killed" in stderr:
+        warnings.append(
+            "The computation exceeded the time limit and so was terminated prematurely."
+        )
+    if "Magma: Fatal Error" in stderr:
+        warnings.append("A fatal error occurred and Magma was forced to exit.")
+    return warnings

@@ -105,3 +105,46 @@ def test_parse_no_banner():
     assert result.version is None
     assert result.seed is None
     assert result.stdout == ""
+
+
+from app.parser import parse_stderr_warnings
+
+
+def test_stderr_alarm_clock():
+    warnings = parse_stderr_warnings("Alarm clock\n")
+    assert len(warnings) == 1
+    assert "time limit" in warnings[0]
+
+
+def test_stderr_cputime_limit():
+    warnings = parse_stderr_warnings("Cputime limit exceeded\n")
+    assert len(warnings) == 1
+    assert "time limit" in warnings[0]
+
+
+def test_stderr_killed():
+    warnings = parse_stderr_warnings("Killed\n")
+    assert len(warnings) == 1
+    assert "time limit" in warnings[0]
+
+
+def test_stderr_fatal_error():
+    warnings = parse_stderr_warnings("Magma: Fatal Error\n")
+    assert len(warnings) == 1
+    assert "fatal error" in warnings[0].lower()
+
+
+def test_stderr_empty():
+    warnings = parse_stderr_warnings("")
+    assert warnings == []
+
+
+def test_stderr_none():
+    warnings = parse_stderr_warnings(None)
+    assert warnings == []
+
+
+def test_stderr_unknown():
+    """Unknown stderr content is ignored (not passed to user)."""
+    warnings = parse_stderr_warnings("some random debug output\n")
+    assert warnings == []
