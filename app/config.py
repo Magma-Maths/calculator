@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # CORS
     allowed_origin: str = "*"
 
+    # Usage logging
+    usage_log_file: str = "/data/usage.jsonl"
+
     # Optional Turnstile
     turnstile_enabled: bool = False
     turnstile_secret_key: str = ""

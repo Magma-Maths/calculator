@@ -70,6 +70,17 @@ def test_execute_timeout(mock_exec, client):
     assert any("time limit" in w for w in data["warnings"])
 
 
+def test_stats_endpoint(client):
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "all_time" in data
+    assert "last_24h" in data
+    for key in ("total_requests", "unique_ips", "avg_elapsed_sec", "successes", "failures"):
+        assert key in data["all_time"]
+        assert key in data["last_24h"]
+
+
 def test_cors_preflight_allows_any_origin(client):
     resp = client.options(
         "/execute",

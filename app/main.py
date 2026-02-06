@@ -14,6 +14,7 @@ from app.config import Settings
 from app.executor import execute_magma, ExecutionResult
 from app.parser import parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
+from app.usage_logger import UsageLogger
 
 settings = Settings()
 rate_limiter = RateLimiter(
@@ -21,6 +22,7 @@ rate_limiter = RateLimiter(
     per_hour=settings.rate_limit_per_hour,
 )
 semaphore = asyncio.Semaphore(settings.max_concurrent)
+usage_logger = UsageLogger(settings.usage_log_file)
 
 logger = logging.getLogger("calculator")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -37,6 +39,7 @@ async def _periodic_cleanup():
     while True:
         await asyncio.sleep(300)
         rate_limiter.cleanup()
+        usage_logger.prune_24h()
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -99,6 +102,11 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/stats")
+async def stats():
+    return usage_logger.stats()
+
+
 @app.post("/execute")
 async def execute(req: ExecuteRequest, request: Request):
     start_time = time.time()
@@ -158,17 +166,17 @@ async def execute(req: ExecuteRequest, request: Request):
             response_data["error"] = parsed.warnings[0]
 
     elapsed = time.time() - start_time
-    logger.info(
-        json.dumps({
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "client_ip": client_ip,
-            "input_size": len(req.code),
-            "elapsed_sec": round(elapsed, 3),
-            "memory_used": parsed.memory,
-            "success": success,
-            "warnings": all_warnings,
-        })
-    )
+    log_entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "client_ip": client_ip,
+        "input_size": len(req.code),
+        "elapsed_sec": round(elapsed, 3),
+        "memory_used": parsed.memory,
+        "success": success,
+        "warnings": all_warnings,
+    }
+    logger.info(json.dumps(log_entry))
+    usage_logger.log(log_entry)
 
     return response_data
 

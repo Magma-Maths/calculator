@@ -67,6 +67,29 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 {"status": "ok"}
 ```
 
+### GET /stats
+
+Returns aggregated usage statistics (all-time and last 24 hours). Each successful `/execute` request is logged to the file at `USAGE_LOG_FILE`.
+
+```json
+{
+  "all_time": {
+    "total_requests": 1234,
+    "unique_ips": 56,
+    "avg_elapsed_sec": 2.3,
+    "successes": 1200,
+    "failures": 34
+  },
+  "last_24h": {
+    "total_requests": 42,
+    "unique_ips": 10,
+    "avg_elapsed_sec": 1.8,
+    "successes": 40,
+    "failures": 2
+  }
+}
+```
+
 ### CORS
 
 By default CORS is not enforced — all origins are allowed (`ALLOWED_ORIGIN=*`). To restrict, set `ALLOWED_ORIGIN` to a comma-separated list of origins (e.g. `https://magma-maths.org,http://localhost`). The special value `http://localhost` matches any port.
@@ -108,6 +131,7 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
+| `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
 
 ### 3a. Start Traefik (once per host)
 
@@ -129,7 +153,7 @@ cp .env.example .env   # edit DOMAIN
 docker compose up -d
 ```
 
-The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it.
+The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
 
 ### 3c. Run without docker-compose (testing)
 
