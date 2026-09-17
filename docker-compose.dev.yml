@@ -1,0 +1,8 @@
+# Build from the working tree instead of pulling from GHCR:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# Deliberately not docker-compose.override.yml, so a plain "docker compose up" pulls.
+services:
+  calculator:
+    build: .
+    # With image: and build: both set, compose reuses a pulled image unless told to build.
+    pull_policy: build

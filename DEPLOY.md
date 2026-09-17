@@ -2,6 +2,8 @@
 
 Step-by-step guide for deploying the Magma Calculator on a fresh Ubuntu server (22.04 or 24.04).
 
+The calculator runs from a prebuilt image, `ghcr.io/magma-maths/calculator`, that GitHub Actions publishes on every push to `main`. The server only pulls it: nothing is compiled there, and the image contains no Magma. Your licensed copy stays on the host and is bind-mounted into the container.
+
 ## Prerequisites
 
 - A server with a public IP
@@ -51,6 +53,8 @@ Copy or install Magma to `/opt/magma` on the host. The directory should contain 
 
 ## 4. Clone the repository
 
+The clone provides the compose files, the env templates and the Traefik stack; the calculator itself comes from the published image, so the server needs no build tooling.
+
 ```bash
 git clone https://github.com/Magma-Maths/calculator.git
 cd calculator
@@ -58,7 +62,7 @@ cd calculator
 
 ## 5. Start Traefik
 
-Traefik is the shared reverse proxy that handles HTTPS. You only set it up once per server — it can serve multiple apps.
+Traefik is the shared reverse proxy that handles HTTPS. You only set it up once per server; it can serve multiple apps.
 
 ```bash
 cd traefik
@@ -98,15 +102,26 @@ Edit `.env` and set your domain:
 DOMAIN=calc.magma-maths.org
 ```
 
-Edit `calculator.env` if you want to change any defaults (timeouts, memory limits, rate limits, CORS). The defaults are fine for most setups.
+`CALCULATOR_VERSION` in the same file selects the image tag. Every commit on `main` is published as `sha-<short>` (the first 7 hex characters of the commit) and as the moving `main`; a release tag such as `v1.2.3` names the same image as its commit's `sha-<short>`. Leave it empty to run the latest `main` build, or pin an exact tag so the server keeps running the same bytes until you change it:
 
-## 7. Build and start
-
-```bash
-docker compose up -d --build
+```
+CALCULATOR_VERSION=v1.2.3
 ```
 
-This builds the image (compiles nsjail, installs Python dependencies) and starts the calculator. The first build takes a few minutes.
+Edit `calculator.env` if you want to change any defaults (timeouts, memory limits, rate limits, CORS). The defaults are fine for most setups.
+
+## 7. Pull and start
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+This downloads the image (the package is public, so no registry login is needed) and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override; this compiles nsjail and takes a few minutes:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
 
 ## 8. Verify
 
@@ -155,12 +170,26 @@ docker compose -f traefik/docker-compose.yml logs -f   # traefik logs
 docker compose restart
 ```
 
-### Rebuild after code update
+### Update to the latest main
 
 ```bash
 git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+`git pull` brings in compose and env changes, `docker compose pull` fetches the image that `CALCULATOR_VERSION` selects, and `up -d` recreates the container if either changed. Without the `pull`, `up -d` keeps whatever image is already on the server.
+
+### Pin or roll back a version
+
+Set `CALCULATOR_VERSION` in `.env` to the tag you want, then run the same two commands:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+A rollback is the previous tag pinned again. Images already on the server are not downloaded twice, so it takes seconds. In-flight computations are killed by the restart.
 
 ### TLS certificates
 

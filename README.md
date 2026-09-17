@@ -92,7 +92,7 @@ Returns aggregated usage statistics (all-time and last 24 hours). Each successfu
 
 ### CORS
 
-By default CORS is not enforced — all origins are allowed (`ALLOWED_ORIGIN=*`). To restrict, set `ALLOWED_ORIGIN` to a comma-separated list of origins (e.g. `https://magma-maths.org,http://localhost`). The special value `http://localhost` matches any port.
+By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). To restrict, set `ALLOWED_ORIGIN` to a comma-separated list of origins (e.g. `https://magma-maths.org,http://localhost`). The special value `http://localhost` matches any port.
 
 ## Setup
 
@@ -103,13 +103,19 @@ By default CORS is not enforced — all origins are allowed (`ALLOWED_ORIGIN=*`)
 - **Docker** with support for `--cap-add SYS_ADMIN` (required for nsjail namespace creation)
 - **Magma** installed on the host (default: `/opt/magma`)
 
-### 1. Build the image
+### 1. Get the image
+
+Every push to `main` builds the image in GitHub Actions and publishes it as `ghcr.io/magma-maths/calculator`, tagged `sha-<short>` (the first 7 hex characters of the commit) and the moving `main`. A `v*` git tag retags that commit's `sha-<short>` image as the version without rebuilding, so a release is the same bytes that already ran from `main`. The image contains no Magma; the host's copy is bind-mounted at run time.
 
 ```bash
-docker build -t magma-calculator .
+docker pull ghcr.io/magma-maths/calculator:main
 ```
 
-The multi-stage Dockerfile compiles nsjail from source, installs Python dependencies via Poetry, and produces a slim runtime image.
+To build from source instead (the multi-stage Dockerfile compiles nsjail and installs the Python dependencies via Poetry), give the local build the same name so the recipes below apply unchanged:
+
+```bash
+docker build -t ghcr.io/magma-maths/calculator:main .
+```
 
 ### 2. Configure
 
@@ -135,7 +141,7 @@ Edit `calculator.env`. Key settings:
 
 ### 3a. Start Traefik (once per host)
 
-Traefik runs as a shared reverse proxy. If you already have a Traefik instance on the host, skip this step — just make sure its Docker network is named `traefik`.
+Traefik runs as a shared reverse proxy. If you already have a Traefik instance on the host, skip this step; just make sure its Docker network is named `traefik`.
 
 ```bash
 cd traefik
@@ -149,11 +155,17 @@ This creates the `traefik` Docker network, binds ports 80/443, and handles Let's
 ### 3b. Run with docker-compose (production)
 
 ```bash
-cp .env.example .env   # edit DOMAIN
+cp .env.example .env   # edit DOMAIN; optionally pin CALCULATOR_VERSION
 docker compose up -d
 ```
 
-The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
+Compose runs `ghcr.io/magma-maths/calculator:${CALCULATOR_VERSION:-main}`, pulling it when it is not already on the host. The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
+
+To build from the working tree instead of pulling, add the dev override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
 
 ### 3c. Run without docker-compose (testing)
 
@@ -163,7 +175,7 @@ docker run --rm \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
   -p 8080:8080 \
-  magma-calculator
+  ghcr.io/magma-maths/calculator:main
 ```
 
 This runs the calculator on plain HTTP (port 8080) without Traefik or TLS.
@@ -179,19 +191,19 @@ docker run --rm \
   -v /opt/magma:/opt/magma:ro \
   --env-file calculator-long.env \
   -p 8081:8080 \
-  magma-calculator
+  ghcr.io/magma-maths/calculator:main
 ```
 
 ## Security
 
 Each Magma process runs inside an nsjail sandbox with:
 
-- **PID, mount, network, and UTS namespace isolation** — the process cannot see or interact with the host
-- **No network access** — `clone_newnet` creates an empty network namespace
-- **Read-only mounts** — Magma installation and system libraries are bind-mounted read-only
-- **cgroup limits** — memory and CPU enforced at the kernel level
-- **Magma `-w` flag** — restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
-- **Privilege drop** — nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
+- **PID, mount, network, and UTS namespace isolation**: the process cannot see or interact with the host
+- **No network access**: `clone_newnet` creates an empty network namespace
+- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only
+- **cgroup limits**: memory and CPU enforced at the kernel level
+- **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
+- **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
 
 ## Development
 

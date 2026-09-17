@@ -1,6 +1,6 @@
 services:
   calculator:
-    build: .
+    image: ghcr.io/magma-maths/calculator:${CALCULATOR_VERSION:-main}
     container_name: magma-calculator
     cap_add:
       - SYS_ADMIN
