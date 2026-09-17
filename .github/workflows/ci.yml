@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  IMAGE: ghcr.io/magma-maths/calculator
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -36,3 +39,41 @@ jobs:
 
       - name: Run tests
         run: poetry run pytest -v
+
+  build:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute the short commit tag
+        id: tag
+        # promote.yml looks up sha-<first 7 hex chars>; the length must match here.
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
+            ${{ env.IMAGE }}:main
+          cache-from: type=gha
+          # mode=max also caches the nsjail-builder stage, which the final image does not contain.
+          cache-to: type=gha,mode=max

@@ -1,0 +1,45 @@
+name: Promote
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  IMAGE: ghcr.io/magma-maths/calculator
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the tag to its commit
+        id: rev
+        # On an annotated tag github.sha is the tag object, not the commit.
+        run: |
+          commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "short=${commit:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag the commit's image as ${{ github.ref_name }}
+        env:
+          SOURCE: ${{ env.IMAGE }}:sha-${{ steps.rev.outputs.short }}
+          TARGET: ${{ env.IMAGE }}:${{ github.ref_name }}
+          COMMIT: ${{ steps.rev.outputs.commit }}
+        run: |
+          if ! docker buildx imagetools inspect "$SOURCE" > /dev/null; then
+            echo "::error::No image $SOURCE for commit $COMMIT. Only commits that CI built on main can be promoted: push the commit to main, wait for the build job, then re-run this workflow."
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"

@@ -12,7 +12,8 @@ RUN apt-get update && apt-get install -y \
     git build-essential pkg-config \
     libprotobuf-dev protobuf-compiler libnl-3-dev libnl-route-3-dev && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone https://github.com/google/nsjail.git /nsjail && \
+# nsjail 3.6 is upstream commit f7847553.
+RUN git clone --branch 3.6 --depth 1 https://github.com/google/nsjail.git /nsjail && \
     cd /nsjail && make
 
 # Stage 3: Runtime
