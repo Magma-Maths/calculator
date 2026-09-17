@@ -71,6 +71,15 @@ def test_empty_code(fake_magma):
     assert data["stdout"] == ""
 
 
+def test_magma_starts_inside_jail(jailed_magma):
+    resp = jailed_magma.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["exit_code"] == 0, data
+    assert data["stdout"] == "2\n"
+    assert data["success"] is True
+
+
 # --- Real Magma tests (skipped if Magma not installed) ---
 
 

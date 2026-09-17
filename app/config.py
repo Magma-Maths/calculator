@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Magma execution
+    magma_root: str = "/opt/magma/current"
     magma_timeout: int = 120
     magma_cpu_timeout: int = 120
     magma_memory_mb: int = 400

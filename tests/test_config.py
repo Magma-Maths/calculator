@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_default_settings():
     settings = Settings()
+    assert settings.magma_root == "/opt/magma/current"
     assert settings.magma_timeout == 120
     assert settings.magma_cpu_timeout == 120
     assert settings.magma_memory_mb == 400

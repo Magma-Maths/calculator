@@ -22,6 +22,26 @@ def wrap_magma_code(code: str, timeout: int) -> str:
     )
 
 
+def magma_environment(magma_root: str) -> list[str]:
+    """Root-dependent variables the magma launcher script exports for magma.exe.
+
+    The launcher (magma_root/magma) is a shell script and the jail mounts no
+    shell and no /usr/bin, so the binary is exec'd directly and gets these
+    from nsjail --env instead. The launcher's constant exports are in
+    nsjail.cfg.
+    """
+    root = magma_root.rstrip("/")
+    return [
+        f"MAGMA_CMD={root}/magma",
+        f"MAGMAPASSFILE={root}/magmapassfile",
+        f"MAGMA_SYSTEM_SPEC={root}/package/spec",
+        f"MAGMA_SYSTEM_PACKAGE_ROOT={root}/package",
+        f"MAGMA_LIBRARY_ROOT={root}/libs",
+        f"MAGMA_HELP_DIR={root}/InternalHelp",
+        f"MAGMA_HTML_DIR={root}/doc/html",
+    ]
+
+
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     wrapped = wrap_magma_code(code, settings.magma_timeout)
 
@@ -31,8 +51,10 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         "--time_limit", str(settings.magma_timeout + 1),
         "--cgroup_mem_max", str(settings.magma_memory_mb * 1024 * 1024),
         "--rlimit_cpu", str(settings.magma_cpu_timeout),
-        "--", "magma", "-w", "-n",
     ]
+    for var in magma_environment(settings.magma_root):
+        cmd += ["--env", var]
+    cmd += ["--", f"{settings.magma_root.rstrip('/')}/magma.exe", "-w", "-n"]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
