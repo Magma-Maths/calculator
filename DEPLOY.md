@@ -92,38 +92,46 @@ curl -s http://127.0.0.1:8080/api/overview | head -c 200
 ## 6. Configure the calculator
 
 ```bash
-cp .env.example .env
 cp calculator.env.example calculator.env
-```
-
-Edit `.env` and set your domain:
-
-```
-DOMAIN=calc.magma-maths.org
-```
-
-`CALCULATOR_VERSION` in the same file selects the image tag. Every commit on `main` is published as `sha-<short>` (the first 7 hex characters of the commit) and as the moving `main`; a release tag such as `v1.2.3` names the same image as its commit's `sha-<short>`. Leave it empty to run the latest `main` build, or pin an exact tag so the server keeps running the same bytes until you change it:
-
-```
-CALCULATOR_VERSION=v1.2.3
 ```
 
 Edit `calculator.env` if you want to change any defaults (timeouts, memory limits, rate limits, CORS). The defaults are fine for most setups.
 
-## 7. Pull and start
+## 7. Choose a version
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`. Set your domain, and set `CALCULATOR_VERSION` to the image tag this server will run:
+
+```
+DOMAIN=calc.magma-maths.org
+CALCULATOR_VERSION=v0.1.0
+```
+
+Every commit on `main` is published as `sha-<short>`, the first 7 hex characters of the commit; those tags are immutable. A release is a `v*` tag such as `v0.1.0`, the same image as its commit's `sha-<short>` under a second name. The available tags are listed on the [package page](https://github.com/orgs/Magma-Maths/packages/container/package/calculator).
+
+There is deliberately no default. With a moving tag, a routine `docker compose pull` or even a restart could change the running code without anyone choosing it, and during an incident nobody could answer "what version is running" from the box. With the pin, `.env` is that answer. If you skip this step, compose refuses to start and names the variable:
+
+```
+error while interpolating services.calculator.image: required variable CALCULATOR_VERSION is missing a value: set CALCULATOR_VERSION in .env, e.g. sha-abc1234 or v1.2.0
+```
+
+## 8. Pull and start
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-This downloads the image (the package is public, so no registry login is needed) and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override; this compiles nsjail and takes a few minutes:
+This downloads the image (the package is public, so no registry login is needed) and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override. The version variable is still required, because compose checks it in the base file before applying the override, but any local name will do since nothing is pulled; this compiles nsjail and takes a few minutes:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
-## 8. Verify
+## 9. Verify
 
 Check that the container is running:
 
@@ -170,7 +178,15 @@ docker compose -f traefik/docker-compose.yml logs -f   # traefik logs
 docker compose restart
 ```
 
-### Update to the latest main
+### Update to a new version
+
+Pick the tag to move to, a release `vX.Y.Z` or the `sha-<short>` of the `main` commit you want, and write it into `.env`:
+
+```
+CALCULATOR_VERSION=v0.2.0
+```
+
+Then:
 
 ```bash
 git pull
@@ -178,18 +194,11 @@ docker compose pull
 docker compose up -d
 ```
 
-`git pull` brings in compose and env changes, `docker compose pull` fetches the image that `CALCULATOR_VERSION` selects, and `up -d` recreates the container if either changed. Without the `pull`, `up -d` keeps whatever image is already on the server.
+`git pull` brings in compose and env changes, `docker compose pull` fetches the pinned image, and `up -d` recreates the container if either changed. Nothing else moves the server: with the version pinned, a `pull` or a restart on its own never changes the running code, and `.env` is the record of what the box runs. Keep it under whatever change tracking you use for the host.
 
-### Pin or roll back a version
+### Roll back
 
-Set `CALCULATOR_VERSION` in `.env` to the tag you want, then run the same two commands:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-A rollback is the previous tag pinned again. Images already on the server are not downloaded twice, so it takes seconds. In-flight computations are killed by the restart.
+A rollback is the previous tag written into `.env` again, followed by the same two compose commands. Images already on the server are not downloaded twice, so it takes seconds. In-flight computations are killed by the restart.
 
 ### TLS certificates
 

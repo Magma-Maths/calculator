@@ -107,14 +107,16 @@ By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). T
 
 Every push to `main` builds the image in GitHub Actions and publishes it as `ghcr.io/magma-maths/calculator`, tagged `sha-<short>` (the first 7 hex characters of the commit) and the moving `main`. A `v*` git tag retags that commit's `sha-<short>` image as the version without rebuilding, so a release is the same bytes that already ran from `main`. The image contains no Magma; the host's copy is bind-mounted at run time.
 
+Always run an exact tag: `sha-<short>` tags are immutable and `v*` tags are releases, so the version on a host is the one written down, and nothing changes it but you.
+
 ```bash
-docker pull ghcr.io/magma-maths/calculator:main
+docker pull ghcr.io/magma-maths/calculator:v0.1.0
 ```
 
-To build from source instead (the multi-stage Dockerfile compiles nsjail and installs the Python dependencies via Poetry), give the local build the same name so the recipes below apply unchanged:
+To build from source instead (the multi-stage Dockerfile compiles nsjail and installs the Python dependencies via Poetry), give the local build a tag of its own and use it in place of `v0.1.0` in the recipes below:
 
 ```bash
-docker build -t ghcr.io/magma-maths/calculator:main .
+docker build -t ghcr.io/magma-maths/calculator:dev .
 ```
 
 ### 2. Configure
@@ -155,16 +157,16 @@ This creates the `traefik` Docker network, binds ports 80/443, and handles Let's
 ### 3b. Run with docker-compose (production)
 
 ```bash
-cp .env.example .env   # edit DOMAIN; optionally pin CALCULATOR_VERSION
+cp .env.example .env   # set DOMAIN and CALCULATOR_VERSION
 docker compose up -d
 ```
 
-Compose runs `ghcr.io/magma-maths/calculator:${CALCULATOR_VERSION:-main}`, pulling it when it is not already on the host. The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
+Compose runs `ghcr.io/magma-maths/calculator:$CALCULATOR_VERSION`, pulling it when it is not already on the host. There is deliberately no default: if the variable is unset, compose refuses to start and names it, so a host always states its version and a `pull` or restart never changes the running code on its own. The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
 
-To build from the working tree instead of pulling, add the dev override:
+To build from the working tree instead of pulling, add the dev override. The version variable is still required, because compose checks it in the base file before applying the override, but any local name will do since nothing is pulled:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
 ### 3c. Run without docker-compose (testing)
@@ -175,7 +177,7 @@ docker run --rm \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
   -p 8080:8080 \
-  ghcr.io/magma-maths/calculator:main
+  ghcr.io/magma-maths/calculator:v0.1.0
 ```
 
 This runs the calculator on plain HTTP (port 8080) without Traefik or TLS.
@@ -191,7 +193,7 @@ docker run --rm \
   -v /opt/magma:/opt/magma:ro \
   --env-file calculator-long.env \
   -p 8081:8080 \
-  ghcr.io/magma-maths/calculator:main
+  ghcr.io/magma-maths/calculator:v0.1.0
 ```
 
 ## Security

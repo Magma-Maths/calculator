@@ -1,5 +1,7 @@
 # Build from the working tree instead of pulling from GHCR:
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# The base file still requires CALCULATOR_VERSION, because compose interpolates each file
+# before merging; any local name works, since pull_policy: build means nothing is pulled.
 # Deliberately not docker-compose.override.yml, so a plain "docker compose up" pulls.
 services:
   calculator:
