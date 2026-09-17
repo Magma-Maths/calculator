@@ -4,18 +4,24 @@ on:
   push:
     tags: ["v*"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/magma-maths/calculator
 
 jobs:
   promote:
+    if: github.repository_owner == 'Magma-Maths'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve the tag to its commit
         id: rev
@@ -40,6 +46,11 @@ jobs:
         run: |
           if ! docker buildx imagetools inspect "$SOURCE" > /dev/null; then
             echo "::error::No image $SOURCE for commit $COMMIT. Only commits that CI built on main can be promoted: push the commit to main, wait for the build job, then re-run this workflow."
+            exit 1
+          fi
+          if docker buildx imagetools inspect "$TARGET" > /dev/null 2>&1; then
+            # Refusal, not a registry failure: a released version tag is never rebound.
+            echo "::error::$TARGET is already published; refusing to rebind a released version tag. Releasing a new version means a new tag."
             exit 1
           fi
           docker buildx imagetools create --tag "$TARGET" "$SOURCE"
