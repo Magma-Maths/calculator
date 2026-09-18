@@ -44,15 +44,25 @@ class UsageLogger:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                self._update_alltime(entry)
-                ts = self._parse_timestamp(entry.get("timestamp", ""))
-                if ts and ts >= cutoff:
-                    self._recent.append((
-                        ts,
-                        entry.get("elapsed_sec", 0.0),
-                        entry.get("success", False),
-                        entry.get("client_ip", ""),
-                    ))
+                if self._is_completion(entry):
+                    self._count(entry, cutoff)
+
+    @staticmethod
+    def _is_completion(entry: dict) -> bool:
+        # Arrival lines are event "start". Files written before arrival
+        # records existed carry no marker at all, and every line is a completion.
+        return entry.get("event", "end") == "end"
+
+    def _count(self, entry: dict, cutoff: float = 0.0):
+        self._update_alltime(entry)
+        ts = self._parse_timestamp(entry.get("timestamp", ""))
+        if ts and ts >= cutoff:
+            self._recent.append((
+                ts,
+                entry.get("elapsed_sec", 0.0),
+                entry.get("success", False),
+                entry.get("client_ip", ""),
+            ))
 
     @staticmethod
     def _parse_timestamp(ts_str: str) -> float | None:
@@ -82,15 +92,8 @@ class UsageLogger:
                 except OSError:
                     self._writable = False
                     logger.warning("Cannot write to usage log: %s", self._path)
-            self._update_alltime(entry)
-            ts = self._parse_timestamp(entry.get("timestamp", ""))
-            if ts:
-                self._recent.append((
-                    ts,
-                    entry.get("elapsed_sec", 0.0),
-                    entry.get("success", False),
-                    entry.get("client_ip", ""),
-                ))
+            if self._is_completion(entry):
+                self._count(entry)
 
     def prune_24h(self):
         cutoff = time.time() - 86400

@@ -69,7 +69,7 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 
 ### GET /stats
 
-Returns aggregated usage statistics (all-time and last 24 hours). Each successful `/execute` request is logged to the file at `USAGE_LOG_FILE`.
+Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
 
 ```json
 {
@@ -205,7 +205,8 @@ Each Magma process runs inside an nsjail sandbox with:
 
 - **PID, mount, network, and UTS namespace isolation**: the process cannot see or interact with the host
 - **No network access**: `clone_newnet` creates an empty network namespace
-- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only
+- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
+- **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
 - **cgroup limits**: memory and CPU enforced at the kernel level
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution

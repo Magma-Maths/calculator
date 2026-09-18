@@ -30,6 +30,15 @@ def jail_environment(flags: list[str]) -> dict[str, str]:
     return env
 
 
+def jail_mounts() -> list[dict[str, str]]:
+    """The cfg's mount blocks, one {field: value} dict each, values unquoted."""
+    cfg = NSJAIL_CFG.read_text()
+    return [
+        dict(re.findall(r'^\s*(\w+):\s*"?([^"\n]*?)"?\s*$', body, re.M))
+        for body in re.findall(r"^mount\s*\{(.*?)^\}", cfg, re.M | re.S)
+    ]
+
+
 def main() -> None:
     args = sys.argv[1:]
     split = args.index("--")
