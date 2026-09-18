@@ -5,6 +5,10 @@ These exercise the full pipeline: FastAPI → executor → subprocess → parser
 - real_magma tests use the real Magma binary (skipped if not available)
 """
 
+import json
+import os
+import shutil
+
 
 def test_simple_arithmetic(fake_magma):
     resp = fake_magma.post("/execute", json={"code": "print 1+1;"})
@@ -78,6 +82,31 @@ def test_magma_starts_inside_jail(jailed_magma):
     assert data["exit_code"] == 0, data
     assert data["stdout"] == "2\n"
     assert data["success"] is True
+
+
+def test_magma_root_symlink_resolved_per_request(jailed_magma_via_symlink, magma_launch, tmp_path):
+    """Magma opens package and library files lazily through the paths it was
+    started with, so a session must be started on the versioned tree rather
+    than on the `current` symlink, and each new session follows the symlink
+    afresh.
+    """
+    def launch():
+        resp = jailed_magma_via_symlink.post("/execute", json={"code": "print 1+1;"})
+        assert resp.status_code == 200
+        assert resp.json()["exit_code"] == 0, resp.json()
+        return json.loads(magma_launch.read_text())
+
+    symlink = os.environ["MAGMA_ROOT"]
+    tree = os.path.realpath(symlink)
+    started = launch()
+    assert started["argv"][0] == f"{tree}/magma.exe"
+    root_vars = {k: v for k, v in started["env"].items() if v.startswith((symlink, tree))}
+    assert root_vars and all(v.startswith(tree) for v in root_vars.values()), root_vars
+
+    upgraded = shutil.copytree(tree, tmp_path / "magma-2.29-11")
+    os.remove(symlink)
+    os.symlink(upgraded, symlink)
+    assert launch()["argv"][0] == f"{upgraded}/magma.exe"
 
 
 # --- Real Magma tests (skipped if Magma not installed) ---

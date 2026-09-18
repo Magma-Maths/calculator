@@ -1,4 +1,5 @@
 import asyncio
+import os
 from dataclasses import dataclass
 
 from app.config import Settings
@@ -44,6 +45,11 @@ def magma_environment(magma_root: str) -> list[str]:
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     wrapped = wrap_magma_code(code, settings.magma_timeout)
+    # Resolved per request, like the launcher's readlink -f: Magma opens
+    # package and library files lazily through these literal paths, so a
+    # session must stay on one tree across a `current` symlink flip while
+    # the next session picks up the new tree.
+    root = os.path.realpath(settings.magma_root)
 
     cmd = [
         "nsjail",
@@ -52,9 +58,9 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         "--cgroup_mem_max", str(settings.magma_memory_mb * 1024 * 1024),
         "--rlimit_cpu", str(settings.magma_cpu_timeout),
     ]
-    for var in magma_environment(settings.magma_root):
+    for var in magma_environment(root):
         cmd += ["--env", var]
-    cmd += ["--", f"{settings.magma_root.rstrip('/')}/magma.exe", "-w", "-n"]
+    cmd += ["--", f"{root}/magma.exe", "-w", "-n"]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

@@ -61,6 +61,8 @@ The calculator bind-mounts `/opt/magma` read-only and starts `magma.exe` from `M
 sudo ln -sfn /opt/magma/magma-2.29-11 /opt/magma/current
 ```
 
+Computations already in flight finish on the tree they started on; new requests pick up the new one.
+
 Verify on the host:
 
 ```bash
