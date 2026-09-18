@@ -9,7 +9,7 @@ RUN poetry config virtualenvs.create false && \
 # Stage 2: nsjail
 FROM ubuntu:24.04 AS nsjail-builder
 RUN apt-get update && apt-get install -y \
-    git build-essential pkg-config \
+    git build-essential pkg-config autoconf bison flex libtool \
     libprotobuf-dev protobuf-compiler libnl-3-dev libnl-route-3-dev && \
     rm -rf /var/lib/apt/lists/*
 # nsjail 3.6, pinned by commit because upstream can move a tag.
