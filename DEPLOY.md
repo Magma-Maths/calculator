@@ -118,7 +118,17 @@ There is deliberately no default. With a moving tag, a routine `docker compose p
 error while interpolating services.calculator.image: required variable CALCULATOR_VERSION is missing a value: set CALCULATOR_VERSION in .env, e.g. sha-abc1234 or v1.2.0
 ```
 
-## 8. Pull and start
+## 8. Make the package public (once per org)
+
+GHCR creates a package private, and the package the CI workflow pushes on its first build is no exception: nothing in the workflows changes that, so a human has to, once. After the first successful build on `main`, open the [package page](https://github.com/orgs/Magma-Maths/packages/container/package/calculator), then **Package settings** > **Danger Zone** > **Change visibility**, and set it to Public.
+
+Until that is done, `docker pull` is denied with a `403` and the next step fails. A server that has to pull before the flip, or one pulling a package that is meant to stay private, needs to log in first with a GitHub personal access token that has the `read:packages` scope:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+
+## 9. Pull and start
 
 ```bash
 docker compose pull
@@ -133,7 +143,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 The override tags the build `calculator-dev`, a local name, so a working-tree build never takes over the pinned tag in `.env`. `CALCULATOR_VERSION` must still be set, because compose interpolates the base file before applying the override, but its value is unused on this path.
 
-## 9. Verify
+## 10. Verify
 
 Check that the container is running:
 
