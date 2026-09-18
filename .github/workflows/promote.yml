@@ -48,9 +48,15 @@ jobs:
             echo "::error::No image $SOURCE for commit $COMMIT. Only commits that CI built on main can be promoted: push the commit to main, wait for the build job, then re-run this workflow."
             exit 1
           fi
-          if docker buildx imagetools inspect "$TARGET" > /dev/null 2>&1; then
+          # buildx exits 1 for a missing tag and for DNS failures, 503s, 429s and auth
+          # errors alike, so the exit status alone cannot say the tag is free. Capture
+          # stderr (2>&1 >/dev/null, in that order) and require the not-found message.
+          if out=$(docker buildx imagetools inspect "$TARGET" 2>&1 >/dev/null); then
             # Refusal, not a registry failure: a released version tag is never rebound.
             echo "::error::$TARGET is already published; refusing to rebind a released version tag. Releasing a new version means a new tag."
+            exit 1
+          elif ! printf '%s\n' "$out" | grep -q ': not found$'; then
+            echo "::error::Cannot tell whether $TARGET is published, not promoting: $out"
             exit 1
           fi
           docker buildx imagetools create --tag "$TARGET" "$SOURCE"
