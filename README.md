@@ -69,7 +69,7 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 
 ### GET /stats
 
-Returns aggregated usage statistics (all-time and last 24 hours). Each successful `/execute` request is logged to the file at `USAGE_LOG_FILE`.
+Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
 
 ```json
 {

@@ -3,6 +3,7 @@ import logging
 import json
 import re
 import time
+import uuid
 
 from contextlib import asynccontextmanager
 
@@ -97,6 +98,10 @@ class ExecuteRequest(BaseModel):
     code: str
 
 
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -135,6 +140,19 @@ async def execute(req: ExecuteRequest, request: Request):
             content={"error": "All execution slots busy"},
         )
 
+    # Persisted before execution so that a run which never returns still
+    # leaves a record; the completion line below carries the same request_id.
+    request_id = uuid.uuid4().hex
+    arrival = {
+        "event": "start",
+        "request_id": request_id,
+        "timestamp": _utc_timestamp(),
+        "client_ip": client_ip,
+        "input_size": len(req.code),
+    }
+    logger.info(json.dumps(arrival))
+    usage_logger.log(arrival)
+
     async with semaphore:
         result: ExecutionResult = await execute_magma(req.code, settings)
 
@@ -167,7 +185,9 @@ async def execute(req: ExecuteRequest, request: Request):
 
     elapsed = time.time() - start_time
     log_entry = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": "end",
+        "request_id": request_id,
+        "timestamp": _utc_timestamp(),
         "client_ip": client_ip,
         "input_size": len(req.code),
         "elapsed_sec": round(elapsed, 3),

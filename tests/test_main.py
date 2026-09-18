@@ -1,8 +1,11 @@
+import json
+
 import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
 from app.executor import ExecutionResult
+from app.usage_logger import UsageLogger
 
 
 @pytest.fixture
@@ -68,6 +71,73 @@ def test_execute_timeout(mock_exec, client):
     data = resp.json()
     assert data["success"] is False
     assert any("time limit" in w for w in data["warnings"])
+
+
+@pytest.fixture
+def usage_log(tmp_path, monkeypatch):
+    """Point main's usage logger at a fresh file and return that path."""
+    from app import main
+    path = tmp_path / "usage.jsonl"
+    monkeypatch.setattr(main, "usage_logger", UsageLogger(str(path)))
+    return path
+
+
+def _entries(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _stats():
+    from app import main
+    return main.usage_logger.stats()
+
+
+def test_request_is_logged_before_execution(client, usage_log):
+    seen_by_executor = []
+
+    async def snapshot_then_run(code, settings):
+        seen_by_executor.extend(_entries(usage_log))
+        return ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+
+    with patch("app.main.execute_magma", side_effect=snapshot_then_run):
+        resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+
+    [arrival] = seen_by_executor
+    assert arrival["event"] == "start"
+    assert arrival["client_ip"] == "testclient"
+    assert arrival["input_size"] == len("print 1+1;")
+    assert arrival["timestamp"]
+
+    assert _entries(usage_log)[0] == arrival
+    [_, completion] = _entries(usage_log)
+    assert completion["event"] == "end"
+    assert completion["request_id"] == arrival["request_id"]
+    assert completion["success"] is True
+    assert completion["elapsed_sec"] >= 0
+
+    assert _stats()["all_time"]["total_requests"] == 1
+    assert _stats()["last_24h"]["total_requests"] == 1
+
+
+def test_arrival_line_outlives_an_execution_that_never_returns(client, usage_log):
+    async def vanish(code, settings):
+        raise RuntimeError("magma never came back")
+
+    with patch("app.main.execute_magma", side_effect=vanish), pytest.raises(RuntimeError):
+        client.post("/execute", json={"code": "print 1+1;"})
+
+    [arrival] = _entries(usage_log)
+    assert arrival["event"] == "start"
+    assert arrival["client_ip"] == "testclient"
+    assert _stats()["all_time"]["total_requests"] == 0
+
+
+def test_rejected_request_leaves_no_arrival_line(client, usage_log):
+    resp = client.post("/execute", json={"code": "x" * (50 * 1024 + 1)})
+    assert resp.status_code == 413
+    assert _entries(usage_log) == []
 
 
 def test_stats_endpoint(client):
