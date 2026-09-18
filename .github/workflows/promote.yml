@@ -1,0 +1,62 @@
+name: Promote
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/magma-maths/calculator
+
+jobs:
+  promote:
+    if: github.repository_owner == 'Magma-Maths'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve the tag to its commit
+        id: rev
+        # On an annotated tag github.sha is the tag object, not the commit.
+        run: |
+          commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "short=${commit:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag the commit's image as ${{ github.ref_name }}
+        env:
+          SOURCE: ${{ env.IMAGE }}:sha-${{ steps.rev.outputs.short }}
+          TARGET: ${{ env.IMAGE }}:${{ github.ref_name }}
+          COMMIT: ${{ steps.rev.outputs.commit }}
+        run: |
+          if ! docker buildx imagetools inspect "$SOURCE" > /dev/null; then
+            echo "::error::No image $SOURCE for commit $COMMIT. Only commits that CI built on main can be promoted: push the commit to main, wait for the build job, then re-run this workflow."
+            exit 1
+          fi
+          # buildx exits 1 for a missing tag and for DNS failures, 503s, 429s and auth
+          # errors alike, so the exit status alone cannot say the tag is free. Capture
+          # stderr (2>&1 >/dev/null, in that order) and require the not-found message.
+          if out=$(docker buildx imagetools inspect "$TARGET" 2>&1 >/dev/null); then
+            # Refusal, not a registry failure: a released version tag is never rebound.
+            echo "::error::$TARGET is already published; refusing to rebind a released version tag. Releasing a new version means a new tag."
+            exit 1
+          elif ! printf '%s\n' "$out" | grep -q ': not found$'; then
+            echo "::error::Cannot tell whether $TARGET is published, not promoting: $out"
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"

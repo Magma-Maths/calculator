@@ -6,15 +6,28 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Runs queue instead of cancelling: a cancelled run leaves its commit with no image.
+  # queue: max holds every pending run; the default, single, keeps only the newest pending
+  # one. It may not be combined with cancel-in-progress: true and is not documented to take
+  # an expression, so PR-branch runs queue as well rather than superseding each other.
+  queue: max
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/magma-maths/calculator
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -36,3 +49,42 @@ jobs:
 
       - name: Run tests
         run: poetry run pytest -v
+
+  build:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'Magma-Maths'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute the short commit tag
+        id: tag
+        # promote.yml looks up sha-<first 7 hex chars>; the length must match here.
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
+            ${{ env.IMAGE }}:main
+          cache-from: type=gha
+          # mode=max also caches the nsjail-builder stage, which the final image does not contain.
+          cache-to: type=gha,mode=max

@@ -2,6 +2,8 @@
 
 Step-by-step guide for deploying the Magma Calculator on a fresh Ubuntu server (22.04 or 24.04).
 
+The calculator runs from a prebuilt image, `ghcr.io/magma-maths/calculator`, that GitHub Actions publishes on every push to `main`. The server only pulls it: nothing is compiled there, and the image contains no Magma. Your licensed copy stays on the host and is bind-mounted into the container.
+
 ## Prerequisites
 
 - A server with a public IP
@@ -71,6 +73,8 @@ Verify on the host:
 
 ## 4. Clone the repository
 
+The clone provides the compose files, the env templates and the Traefik stack; the calculator itself comes from the published image, so the server needs no build tooling.
+
 ```bash
 git clone https://github.com/Magma-Maths/calculator.git
 cd calculator
@@ -78,7 +82,7 @@ cd calculator
 
 ## 5. Start Traefik
 
-Traefik is the shared reverse proxy that handles HTTPS. You only set it up once per server — it can serve multiple apps.
+Traefik is the shared reverse proxy that handles HTTPS. You only set it up once per server; it can serve multiple apps.
 
 ```bash
 cd traefik
@@ -108,27 +112,58 @@ curl -s http://127.0.0.1:8080/api/overview | head -c 200
 ## 6. Configure the calculator
 
 ```bash
-cp .env.example .env
 cp calculator.env.example calculator.env
-```
-
-Edit `.env` and set your domain:
-
-```
-DOMAIN=calc.magma-maths.org
 ```
 
 Edit `calculator.env` if you want to change any defaults (timeouts, memory limits, rate limits, CORS). The defaults are fine for most setups.
 
-## 7. Build and start
+## 7. Choose a version
 
 ```bash
-docker compose up -d --build
+cp .env.example .env
 ```
 
-This builds the image (compiles nsjail, installs Python dependencies) and starts the calculator. The first build takes a few minutes.
+Edit `.env`. Set your domain, and set `CALCULATOR_VERSION` to the image tag this server will run:
 
-## 8. Verify
+```
+DOMAIN=calc.magma-maths.org
+CALCULATOR_VERSION=v0.1.0
+```
+
+Every commit on `main` is published as `sha-<short>`, the first 7 hex characters of the commit; those tags are immutable. A release is a `v*` tag such as `v0.1.0`, the same image as its commit's `sha-<short>` under a second name. The available tags are listed on the [package page](https://github.com/orgs/Magma-Maths/packages/container/package/calculator).
+
+There is deliberately no default. With a moving tag, a routine `docker compose pull` or even a restart could change the running code without anyone choosing it, and during an incident nobody could answer "what version is running" from the box. With the pin, `.env` is that answer. If you skip this step, compose refuses to start and names the variable:
+
+```
+error while interpolating services.calculator.image: required variable CALCULATOR_VERSION is missing a value: set CALCULATOR_VERSION in .env, e.g. sha-abc1234 or v1.2.0
+```
+
+## 8. Make the package public (once per org)
+
+GHCR creates a package private, and the package the CI workflow pushes on its first build is no exception: nothing in the workflows changes that, so a human has to, once. After the first successful build on `main`, open the [package page](https://github.com/orgs/Magma-Maths/packages/container/package/calculator), then **Package settings** > **Danger Zone** > **Change visibility**, and set it to Public.
+
+Until that is done, `docker pull` is denied with a `403` and the next step fails. A server that has to pull before the flip, or one pulling a package that is meant to stay private, needs to log in first with a GitHub personal access token that has the `read:packages` scope:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+
+## 9. Pull and start
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+This downloads the image and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override; this compiles nsjail and takes a few minutes:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+The override tags the build `calculator-dev`, a local name, so a working-tree build never takes over the pinned tag in `.env`. `CALCULATOR_VERSION` must still be set, because compose interpolates the base file before applying the override, but its value is unused on this path.
+
+## 10. Verify
 
 Check that the container is running:
 
@@ -175,12 +210,27 @@ docker compose -f traefik/docker-compose.yml logs -f   # traefik logs
 docker compose restart
 ```
 
-### Rebuild after code update
+### Update to a new version
+
+Pick the tag to move to, a release `vX.Y.Z` or the `sha-<short>` of the `main` commit you want, and write it into `.env`:
+
+```
+CALCULATOR_VERSION=v0.2.0
+```
+
+Then:
 
 ```bash
 git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+`git pull` brings in compose and env changes, `docker compose pull` fetches the pinned image, and `up -d` recreates the container if either changed. Nothing else moves the server: with the version pinned, a `pull` or a restart on its own never changes the running code, and `.env` is the record of what the box runs. Keep it under whatever change tracking you use for the host.
+
+### Roll back
+
+A rollback is the previous tag written into `.env` again, followed by the same two compose commands. Images already on the server are not downloaded twice, so it takes seconds. In-flight computations are killed by the restart.
 
 ### TLS certificates
 

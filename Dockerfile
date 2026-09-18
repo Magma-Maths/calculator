@@ -12,8 +12,12 @@ RUN apt-get update && apt-get install -y \
     git build-essential pkg-config \
     libprotobuf-dev protobuf-compiler libnl-3-dev libnl-route-3-dev && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone https://github.com/google/nsjail.git /nsjail && \
-    cd /nsjail && make
+# nsjail 3.6, pinned by commit because upstream can move a tag.
+RUN git init -q /nsjail && cd /nsjail && \
+    git remote add origin https://github.com/google/nsjail.git && \
+    git fetch -q --depth 1 origin f78475530b46d0186111a9096b30725f816b55fe && \
+    git checkout -q FETCH_HEAD && \
+    make
 
 # Stage 3: Runtime
 FROM python:3.12-slim
