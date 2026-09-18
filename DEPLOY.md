@@ -43,10 +43,30 @@ sudo ufw allow 443/tcp
 
 ## 3. Install Magma
 
-Copy or install Magma to `/opt/magma` on the host. The directory should contain the `magma` binary at `/opt/magma/magma`. Verify:
+Install Magma under `/opt/magma` on the host, one directory per version, with a `current` symlink pointing at the version to serve:
+
+```
+/opt/magma/
+  current -> /opt/magma/magma-2.29-10
+  magma-2.29-10/
+    magma            launcher script (used on the host, not in the sandbox)
+    magma.exe        the Magma binary (a symlink to the CPU-specific build)
+    magmapassfile    license file
+    libs/  package/  InternalHelp/  doc/
+```
+
+The calculator bind-mounts `/opt/magma` read-only and starts `magma.exe` from `MAGMA_ROOT` (default `/opt/magma/current`) with the environment the launcher script would have set. Upgrading Magma is a symlink flip:
 
 ```bash
-/opt/magma/magma -version
+sudo ln -sfn /opt/magma/magma-2.29-11 /opt/magma/current
+```
+
+Computations already in flight finish on the tree they started on; new requests pick up the new one.
+
+Verify on the host:
+
+```bash
+/opt/magma/current/magma -V
 ```
 
 ## 4. Clone the repository

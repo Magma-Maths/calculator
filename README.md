@@ -121,6 +121,7 @@ Edit `calculator.env`. Key settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MAGMA_ROOT` | `/opt/magma/current` | Magma version tree holding `magma.exe` and `magmapassfile`; must be under `/opt/magma` (the bind mount) |
 | `MAGMA_TIMEOUT` | 120 | Wall-clock timeout (seconds) |
 | `MAGMA_CPU_TIMEOUT` | 120 | CPU time limit (seconds) |
 | `MAGMA_MEMORY_MB` | 400 | Memory limit (MB) |
