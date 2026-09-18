@@ -8,8 +8,12 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Runs on main queue instead of cancelling: a cancelled run leaves its commit with no image.
-  cancel-in-progress: ${{ github.ref_name != 'main' }}
+  # Runs queue instead of cancelling: a cancelled run leaves its commit with no image.
+  # queue: max holds every pending run; the default, single, keeps only the newest pending
+  # one. It may not be combined with cancel-in-progress: true and is not documented to take
+  # an expression, so PR-branch runs queue as well rather than superseding each other.
+  queue: max
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/magma-maths/calculator
