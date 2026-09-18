@@ -205,7 +205,8 @@ Each Magma process runs inside an nsjail sandbox with:
 
 - **PID, mount, network, and UTS namespace isolation**: the process cannot see or interact with the host
 - **No network access**: `clone_newnet` creates an empty network namespace
-- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only
+- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
+- **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
 - **cgroup limits**: memory and CPU enforced at the kernel level
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
