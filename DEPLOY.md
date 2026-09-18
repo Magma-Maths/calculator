@@ -125,11 +125,13 @@ docker compose pull
 docker compose up -d
 ```
 
-This downloads the image (the package is public, so no registry login is needed) and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override. The version variable is still required, because compose checks it in the base file before applying the override, but any local name will do since nothing is pulled; this compiles nsjail and takes a few minutes:
+This downloads the image and starts the calculator. To build the image on the server instead, for example to try a local change, add the dev override; this compiles nsjail and takes a few minutes:
 
 ```bash
-CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
+
+The override tags the build `calculator-dev`, a local name, so a working-tree build never takes over the pinned tag in `.env`. `CALCULATOR_VERSION` must still be set, because compose interpolates the base file before applying the override, but its value is unused on this path.
 
 ## 9. Verify
 

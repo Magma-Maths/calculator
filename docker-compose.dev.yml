@@ -1,10 +1,14 @@
 # Build from the working tree instead of pulling from GHCR:
-#   CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 # The base file still requires CALCULATOR_VERSION, because compose interpolates each file
-# before merging; any local name works, since pull_policy: build means nothing is pulled.
+# before merging, but its value is unused here: this override renames the image and
+# pull_policy: build means nothing is pulled.
 # Deliberately not docker-compose.override.yml, so a plain "docker compose up" pulls.
 services:
   calculator:
     build: .
+    # A local-only name. Without it the working-tree build inherits the base file's pinned
+    # tag, and .env, docker ps and docker compose config would all still name the release.
+    image: calculator-dev
     # With image: and build: both set, compose reuses a pulled image unless told to build.
     pull_policy: build

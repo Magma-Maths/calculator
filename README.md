@@ -163,11 +163,13 @@ docker compose up -d
 
 Compose runs `ghcr.io/magma-maths/calculator:$CALCULATOR_VERSION`, pulling it when it is not already on the host. There is deliberately no default: if the variable is unset, compose refuses to start and names it, so a host always states its version and a `pull` or restart never changes the running code on its own. The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
 
-To build from the working tree instead of pulling, add the dev override. The version variable is still required, because compose checks it in the base file before applying the override, but any local name will do since nothing is pulled:
+To build from the working tree instead of pulling, add the dev override, which tags the build `calculator-dev` so a local build never takes over the pinned tag:
 
 ```bash
-CALCULATOR_VERSION=dev docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
+
+`CALCULATOR_VERSION` must still be set, because compose interpolates the base file before applying the override, but its value is unused on this path.
 
 ### 3c. Run without docker-compose (testing)
 
