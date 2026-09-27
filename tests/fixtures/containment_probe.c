@@ -151,8 +151,9 @@ static socklen_t abstract_address(struct sockaddr_un *address, const char *name)
 
 static void abstract_socket(int listen_mode) {
     need_argument();
-    unsigned hold;
-    nonce_hold(argument, &hold);
+    unsigned hold = 0;
+    if (listen_mode) nonce_hold(argument, &hold);
+    else nonce(argument);
     struct sockaddr_un address;
     socklen_t length = abstract_address(&address, argument);
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -176,8 +177,9 @@ static void abstract_socket(int listen_mode) {
 
 static void tmp_file(int write_mode) {
     need_argument();
-    unsigned hold;
-    nonce_hold(argument, &hold);
+    unsigned hold = 0;
+    if (write_mode) nonce_hold(argument, &hold);
+    else nonce(argument);
     char path[128], fields[160];
     snprintf(path, sizeof(path), "/tmp/calc-probe-%s", argument);
     int fd = open(path, write_mode ? O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC : O_RDONLY | O_CLOEXEC, 0600);
@@ -270,19 +272,35 @@ static void tmp_exec(const char *self) {
     if (source >= 0) close(source);
     if (destination >= 0) close(destination);
     if (!error) {
-        pid_t child = fork();
-        if (child < 0) error = errno;
-        else if (child == 0) {
-            char *const args[] = { path, "-w", "-n", NULL };
-            int null = open("/dev/null", O_RDONLY);
-            if (null >= 0) dup2(null, STDIN_FILENO);
-            execv(path, args);
-            _exit(errno == EACCES ? 13 : 12);
-        } else {
-            int status;
-            waitpid(child, &status, 0);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 13) error = EACCES;
-            else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) error = EIO;
+        int request_pipe[2];
+        if (pipe(request_pipe) < 0) error = errno;
+        else {
+            static const char request[] = "CALC_PROBE answer\n";
+            if (write(request_pipe[1], request, sizeof(request) - 1) != sizeof(request) - 1)
+                error = errno ? errno : EIO;
+            close(request_pipe[1]);
+            if (!error) {
+                pid_t child = fork();
+                if (child < 0) error = errno;
+                else if (child == 0) {
+                    char *const args[] = { path, "-w", "-n", NULL };
+                    if (dup2(request_pipe[0], STDIN_FILENO) < 0) _exit(errno);
+                    if (request_pipe[0] != STDIN_FILENO) close(request_pipe[0]);
+                    close(STDOUT_FILENO);
+                    close(STDERR_FILENO);
+                    execv(path, args);
+                    _exit(errno > 0 && errno < 256 ? errno : EIO);
+                } else {
+                    int status;
+                    pid_t waited;
+                    do { waited = waitpid(child, &status, 0); }
+                    while (waited < 0 && errno == EINTR);
+                    if (waited < 0) error = errno;
+                    else if (!WIFEXITED(status)) error = EIO;
+                    else error = WEXITSTATUS(status);
+                }
+            }
+            close(request_pipe[0]);
         }
     }
     unlink(path);
