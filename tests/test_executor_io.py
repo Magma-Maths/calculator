@@ -1,6 +1,7 @@
 import json
 import asyncio
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -8,8 +9,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+import uvloop
 
 from app import main
+from app import executor
 from app.config import Settings
 from app.executor import ExecutionIOError, execute_magma
 from app.ratelimit import RateLimiter
@@ -101,6 +104,19 @@ def test_failed_child_diagnostic_is_single_line_and_bounded(tmp_path, monkeypatc
     assert "\x1b" not in error
     assert "\n" not in error
     assert len(error.encode("utf-8")) <= 2100
+    assert error == _entries(usage_path)[1]["error"]
+
+
+@pytest.mark.parametrize("stderr_text", ['"' * 2048, "\\" * 2048, "é" * 2048])
+def test_failed_child_preview_fits_serialized_budget(tmp_path, monkeypatch, stderr_text):
+    body = f"import sys\nsys.stderr.write({stderr_text!r})\nsys.exit(4)\n"
+    client, usage_path = _client(tmp_path, monkeypatch, body)
+    response = client.post("/execute", json={"code": "1;"})
+    assert response.status_code == 200
+    error = response.json()["error"]
+    preview = error.split(": ", 1)[1][:-1]
+    assert len(json.dumps(preview, ensure_ascii=True)[1:-1].encode("utf-8")) <= 2048
+    assert len(json.dumps(preview, ensure_ascii=False)[1:-1].encode("utf-8")) <= 2048
     assert error == _entries(usage_path)[1]["error"]
 
 
@@ -289,3 +305,58 @@ def test_cancellation_reaps_child_group(tmp_path, monkeypatch):
     pid = int(marker.read_text())
     stat = Path(f"/proc/{pid}/stat")
     assert not stat.exists() or stat.read_text().split()[2] == "Z"
+
+
+def test_cancellation_during_overflow_cleanup_closes_pipes(tmp_path, monkeypatch):
+    marker = tmp_path / "descendant-pid"
+    body = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], "
+        "start_new_session=True)\n"
+        f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
+        "sys.stdout.buffer.write(b'x' * 2048); sys.stdout.flush()\n"
+        "time.sleep(20)\n"
+    )
+    _client(tmp_path, monkeypatch, body, magma_capture_kb=1, magma_output_kb=1)
+    real_spawn = asyncio.create_subprocess_exec
+    real_killpg = os.killpg
+    holder = {}
+
+    async def record_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        holder["proc"] = proc
+        return proc
+
+    async def run():
+        cleanup_started = asyncio.Event()
+
+        def record_killpg(pid, sig):
+            real_killpg(pid, sig)
+            cleanup_started.set()
+
+        monkeypatch.setattr(executor.asyncio, "create_subprocess_exec", record_spawn)
+        monkeypatch.setattr(executor.os, "killpg", record_killpg)
+        task = asyncio.create_task(execute_magma("1;", main.settings))
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+            proc = holder["proc"]
+            assert proc.returncode is not None
+            assert all(
+                proc._transport.get_pipe_transport(fd).is_closing()
+                for fd in (1, 2)
+            )
+        finally:
+            if marker.exists():
+                os.kill(int(marker.read_text()), signal.SIGKILL)
+            if "proc" in holder:
+                for fd in (1, 2):
+                    holder["proc"]._transport.get_pipe_transport(fd).close()
+                await asyncio.wait_for(holder["proc"].wait(), timeout=2)
+
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        runner.run(run())

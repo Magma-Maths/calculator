@@ -156,6 +156,22 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         except asyncio.TimeoutError as exc:
             raise RuntimeError("Pipe cleanup exceeded deadline") from exc
 
+    cleanup_task: asyncio.Task | None = None
+
+    async def finish_cleanup():
+        nonlocal cleanup_task
+        if cleanup_task is None:
+            cleanup_task = asyncio.create_task(cleanup())
+        interrupted = False
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                interrupted = True
+        cleanup_task.result()
+        if interrupted:
+            raise asyncio.CancelledError
+
     input_bytes = wrapped.encode("utf-8")
     stdout_reader = asyncio.create_task(read_stream(proc.stdout, stdout_parts, False))
     stderr_reader = asyncio.create_task(read_stream(proc.stderr, stderr_parts, True))
@@ -164,7 +180,6 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     overflow_waiter = asyncio.create_task(overflow.wait())
     work = {stdout_reader, stderr_reader, writer, waiter}
     limit_reason = None
-    cleanup_started = False
     try:
         while True:
             if overflow.is_set():
@@ -190,18 +205,18 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
                 if task.done() and not task.cancelled():
                     task.result()
         if limit_reason is not None:
-            cleanup_started = True
-            await cleanup()
+            await finish_cleanup()
         else:
             for task in work:
                 task.result()
     except asyncio.CancelledError:
-        if not cleanup_started:
-            await asyncio.shield(cleanup())
+        await finish_cleanup()
         raise
     except Exception as exc:
-        if not cleanup_started:
-            await asyncio.shield(cleanup())
+        try:
+            await finish_cleanup()
+        except Exception as cleanup_exc:
+            exc = cleanup_exc
         raise ExecutionIOError("Execution I/O failed") from exc
     finally:
         overflow_waiter.cancel()

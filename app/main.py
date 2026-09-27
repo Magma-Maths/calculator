@@ -111,7 +111,15 @@ def _stderr_preview(stderr: str) -> str:
     clean = _ANSI_SEQUENCE.sub("", stderr)
     clean = "".join(char if char.isprintable() else " " for char in clean)
     clean = " ".join(clean.split())
-    return clean.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+    preview = []
+    escaped_bytes = 0
+    for char in clean:
+        char_bytes = len(json.dumps(char, ensure_ascii=True)) - 2
+        if escaped_bytes + char_bytes > 2048:
+            break
+        preview.append(char)
+        escaped_bytes += char_bytes
+    return "".join(preview)
 
 
 @app.get("/health")
