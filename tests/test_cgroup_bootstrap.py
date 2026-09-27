@@ -85,6 +85,27 @@ def test_bootstrap_stops_without_required_controller(tmp_path, capsys):
     assert "cpu controller is missing" in capsys.readouterr().err
 
 
+def test_bootstrap_redacts_invalid_settings(tmp_path, monkeypatch, capsys):
+    secret = "SYNTHETIC_SECRET_REVIEW_VALUE"
+    monkeypatch.setenv("TURNSTILE_SECRET_KEY", secret)
+    monkeypatch.setenv("MAGMA_CPU_MS_PER_SEC", "0")
+    fs = FakeCgroupFiles(tmp_path)
+
+    def forbid_cgroup_read(_path):
+        raise AssertionError("cgroup read")
+
+    fs.read = forbid_cgroup_read
+    calls = []
+
+    status = main(root=tmp_path, fs=fs, exec_fn=lambda *args: calls.append(args))
+
+    assert status == 1
+    assert calls == []
+    diagnostic = capsys.readouterr().err
+    assert secret.split("_", 1)[1] not in diagnostic
+    assert "invalid configuration (settings: value_error)" in diagnostic
+
+
 def test_bootstrap_stops_over_budget(tmp_path, capsys):
     fs = FakeCgroupFiles(tmp_path)
     status, calls = run_fake_bootstrap(tmp_path, fs, max_concurrent=6)

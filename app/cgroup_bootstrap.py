@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from pydantic import ValidationError
+
 from app.config import Settings
 
 
@@ -113,10 +115,21 @@ def main(
 ) -> int:
     fs = fs or CgroupFiles()
     try:
-        _check_budget(settings or Settings())
+        configured = settings if settings is not None else Settings()
+    except ValidationError as exc:
+        issues = set()
+        for error in exc.errors(include_input=False, include_context=False, include_url=False):
+            location = error["loc"]
+            field = location[0] if location and location[0] in Settings.model_fields else "settings"
+            issues.add(f"{field}: {error['type']}")
+        summary = ", ".join(sorted(issues))
+        print(f"cgroup bootstrap: invalid configuration ({summary})", file=sys.stderr)
+        return 1
+    try:
+        _check_budget(configured)
         _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root)
         _check_controls(root, fs, os.getpid())
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, RuntimeError) as exc:
         print(f"cgroup bootstrap: {exc}", file=sys.stderr)
         return 1
     exec_fn(sys.executable, [sys.executable, "-m", "app.main"])
