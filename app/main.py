@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.executor import execute_magma, ExecutionResult
+from app.executor import execute_magma, ExecutionIOError, ExecutionResult
 from app.parser import parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
 from app.usage_logger import UsageLogger
@@ -102,6 +102,18 @@ def _utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_ANSI_SEQUENCE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[A-Za-z])"
+)
+
+
+def _stderr_preview(stderr: str) -> str:
+    clean = _ANSI_SEQUENCE.sub("", stderr)
+    clean = "".join(char if char.isprintable() else " " for char in clean)
+    clean = " ".join(clean.split())
+    return clean.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -153,21 +165,60 @@ async def execute(req: ExecuteRequest, request: Request):
     logger.info(json.dumps(arrival))
     usage_logger.log(arrival)
 
-    async with semaphore:
-        result: ExecutionResult = await execute_magma(req.code, settings)
+    try:
+        async with semaphore:
+            result: ExecutionResult = await execute_magma(req.code, settings)
+    except (OSError, ExecutionIOError) as exc:
+        launch_failure = isinstance(exc, OSError)
+        error = (
+            "Failed to launch the computation."
+            if launch_failure else "Execution I/O failed before a child result was available."
+        )
+        log_entry = {
+            "event": "end", "request_id": request_id,
+            "timestamp": _utc_timestamp(), "client_ip": client_ip,
+            "input_size": len(req.code),
+            "elapsed_sec": round(time.time() - start_time, 3),
+            "memory_used": None, "success": False,
+            "warnings": [error], "error": error,
+        }
+        logger.info(json.dumps(log_entry))
+        usage_logger.log(log_entry)
+        return JSONResponse(status_code=503 if launch_failure else 502, content={"error": error})
 
     # Parse output
     parsed = parse_magma_output(result.stdout, settings.magma_output_bytes)
-    stderr_warnings = parse_stderr_warnings(result.stderr)
+    stderr_warnings = (
+        [] if result.limit_reason == "output_limit"
+        else parse_stderr_warnings(result.stderr)
+    )
     all_warnings = parsed.warnings + stderr_warnings
 
-    success = result.exit_code == 0 and not all_warnings
+    error = None
+    if result.limit_reason == "output_limit":
+        ceiling = (
+            "stderr capture" if result.limit_detail == "stderr_capture"
+            else "combined capture"
+        )
+        error = f"The {ceiling} ceiling was exceeded."
+        all_warnings.append(error)
+    elif result.limit_reason == "wall_timeout":
+        error = "The computation exceeded the time limit and so was terminated prematurely."
+        if error not in all_warnings:
+            all_warnings.append(error)
+    elif result.exit_code != 0:
+        preview = _stderr_preview(result.stderr)
+        detail = preview if preview else "no stderr was captured"
+        error = f"The computation exited with code {result.exit_code}: {detail}."
+        all_warnings.append(error)
+
+    success = result.exit_code == 0 and not all_warnings and result.limit_reason is None
 
     response_data = {
         "success": success,
         "stdout": parsed.stdout,
         "exit_code": result.exit_code,
-        "truncated": parsed.truncated,
+        "truncated": parsed.truncated or result.limit_reason == "output_limit",
         "magma": {
             "version": parsed.version,
             "seed": parsed.seed,
@@ -178,7 +229,9 @@ async def execute(req: ExecuteRequest, request: Request):
     }
 
     if not success:
-        if stderr_warnings:
+        if error:
+            response_data["error"] = error
+        elif stderr_warnings:
             response_data["error"] = stderr_warnings[0]
         elif parsed.warnings:
             response_data["error"] = parsed.warnings[0]
@@ -195,6 +248,8 @@ async def execute(req: ExecuteRequest, request: Request):
         "success": success,
         "warnings": all_warnings,
     }
+    if "error" in response_data:
+        log_entry["error"] = response_data["error"]
     logger.info(json.dumps(log_entry))
     usage_logger.log(log_entry)
 

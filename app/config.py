@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -7,8 +8,11 @@ class Settings(BaseSettings):
     magma_timeout: int = 120
     magma_cpu_timeout: int = 120
     magma_memory_mb: int = 400
+    magma_pids_max: int = 64
+    magma_cpu_ms_per_sec: int = 1000
     magma_input_kb: int = 50
     magma_output_kb: int = 20
+    magma_capture_kb: int = 256
 
     # Service
     max_concurrent: int = 4
@@ -28,6 +32,17 @@ class Settings(BaseSettings):
     turnstile_enabled: bool = False
     turnstile_secret_key: str = ""
 
+    @model_validator(mode="after")
+    def validate_executor_limits(self):
+        if any(value <= 0 for value in (
+            self.magma_pids_max, self.magma_cpu_ms_per_sec,
+            self.magma_output_kb, self.magma_capture_kb,
+        )):
+            raise ValueError("Executor limits must be positive")
+        if self.magma_capture_kb < self.magma_output_kb:
+            raise ValueError("MAGMA_CAPTURE_KB must be at least MAGMA_OUTPUT_KB")
+        return self
+
     @property
     def allowed_origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origin.split(",")]
@@ -39,3 +54,7 @@ class Settings(BaseSettings):
     @property
     def magma_output_bytes(self) -> int:
         return self.magma_output_kb * 1024
+
+    @property
+    def magma_capture_bytes(self) -> int:
+        return self.magma_capture_kb * 1024
