@@ -1,5 +1,5 @@
 # Stage 1: Python dependencies
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
 WORKDIR /app
 RUN pip install poetry
 COPY pyproject.toml poetry.lock* ./
@@ -7,7 +7,7 @@ RUN poetry config virtualenvs.create false && \
     poetry install --only main --no-root --no-interaction --no-ansi
 
 # Stage 2: nsjail
-FROM ubuntu:24.04 AS nsjail-builder
+FROM python:3.12-slim-bookworm AS nsjail-builder
 RUN apt-get update && apt-get install -y \
     git build-essential pkg-config autoconf bison flex libtool \
     libprotobuf-dev protobuf-compiler libnl-3-dev libnl-route-3-dev && \
@@ -20,18 +20,21 @@ RUN git init -q /nsjail && cd /nsjail && \
     make
 
 # Stage 3: Runtime
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 # Install nsjail runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnl-3-200 libnl-route-3-200 libprotobuf-lite32t64 && \
+    libnl-3-200 libnl-route-3-200 libprotobuf32 && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for Magma (nsjail drops privileges to this user)
 RUN useradd -m calculator
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/local/bin/nsjail
+RUN ldd -r /usr/local/bin/nsjail > /tmp/nsjail-ldd && \
+    ! grep -E 'not found|undefined symbol' /tmp/nsjail-ldd && \
+    rm /tmp/nsjail-ldd
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
@@ -42,4 +45,4 @@ COPY nsjail.cfg .
 # nsjail drops privileges to 'calculator' for Magma execution
 EXPOSE 8080
 
-CMD ["python", "-m", "app.main"]
+CMD ["python", "-m", "app.cgroup_bootstrap"]

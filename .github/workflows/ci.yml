@@ -8,47 +8,47 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Runs queue instead of cancelling: a cancelled run leaves its commit with no image.
-  # queue: max holds every pending run; the default, single, keeps only the newest pending
-  # one. It may not be combined with cancel-in-progress: true and is not documented to take
-  # an expression, so PR-branch runs queue as well rather than superseding each other.
+  # Keep every eligible main run in order so its commit can receive an image.
   queue: max
   cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/magma-maths/calculator
+  CANDIDATE_ARTIFACT: calculator-candidate
 
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
+      - uses: snok/install-poetry@v1
         with:
           version: latest
           virtualenvs-create: true
           virtualenvs-in-project: true
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
-
-      - name: Install dependencies
-        run: poetry install --no-interaction
-
-      - name: Run tests
-        run: poetry run pytest -v
+      - run: poetry install --no-interaction
+      - name: Run fake-only tests
+        run: |
+          poetry run pytest -v \
+            tests/test_config.py tests/test_executor.py tests/test_executor_io.py \
+            tests/test_main.py tests/test_parser.py tests/test_ratelimit.py \
+            tests/test_usage_logger.py tests/test_cgroup_bootstrap.py \
+            tests/test_integration.py::test_simple_arithmetic \
+            tests/test_integration.py::test_variable_and_print \
+            tests/test_integration.py::test_multiple_prints \
+            tests/test_integration.py::test_error_handling \
+            tests/test_integration.py::test_full_response_structure \
+            tests/test_integration.py::test_empty_code \
+            tests/test_integration.py::test_magma_starts_inside_jail \
+            tests/test_integration.py::test_magma_root_symlink_resolved_per_request
 
   build:
     needs: test
@@ -56,40 +56,169 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
-    env:
-      # Pull requests build the image but publish nothing, so a broken Dockerfile
-      # fails before the merge rather than on main.
-      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'Magma-Maths' }}
-
     steps:
       - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build candidate once and load it
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: calculator:candidate
+          cache-from: type=gha
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'Magma-Maths' && 'type=gha,mode=max' || '' }}
+      - name: Save candidate and record identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/calculator-candidate"
+          docker save calculator:candidate -o "$RUNNER_TEMP/calculator-candidate/calculator-image.tar"
+          archive_sha=$(sha256sum "$RUNNER_TEMP/calculator-candidate/calculator-image.tar" | cut -d ' ' -f 1)
+          image_id=$(docker image inspect calculator:candidate --format '{{.Id}}')
+          [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'ARCHIVE_SHA256=%s\nIMAGE_ID=%s\n' "$archive_sha" "$image_id" > "$RUNNER_TEMP/calculator-candidate/calculator-image.env"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calculator-candidate
+          path: ${{ runner.temp }}/calculator-candidate/
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  canary:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: calculator-candidate
+          path: ${{ runner.temp }}/calculator-candidate
+      - name: Verify and load the candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/calculator-candidate"
+          mapfile -t lines < calculator-image.env
+          (( ${#lines[@]} == 2 ))
+          [[ "${lines[0]}" =~ ^ARCHIVE_SHA256=([a-f0-9]{64})$ ]]
+          archive_sha="${BASH_REMATCH[1]}"
+          [[ "${lines[1]}" =~ ^IMAGE_ID=(sha256:[a-f0-9]{64})$ ]]
+          image_id="${BASH_REMATCH[1]}"
+          echo "$archive_sha  calculator-image.tar" | sha256sum --check --status
+          docker load --input calculator-image.tar
+          [[ "$(docker image inspect calculator:candidate --format '{{.Id}}')" == "$image_id" ]]
+          echo "IMAGE_ID=$image_id" >> "$GITHUB_ENV"
+      - name: Compile external static fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/magma-fixture"
+          mkdir -p "$fixture/versions/probe"
+          cc -O2 -static -pthread -Wall -Wextra -Werror tests/fixtures/containment_probe.c -o "$fixture/versions/probe/magma.exe"
+          readelf -l "$fixture/versions/probe/magma.exe" > "$RUNNER_TEMP/probe-program-headers.txt"
+          readelf -d "$fixture/versions/probe/magma.exe" > "$RUNNER_TEMP/probe-dynamic-section.txt"
+          ! grep -q INTERP "$RUNNER_TEMP/probe-program-headers.txt"
+          ! grep -q NEEDED "$RUNNER_TEMP/probe-dynamic-section.txt"
+          ln -s versions/probe "$fixture/current"
+      - name: Check runtime prerequisites and execute jailed answer
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info >/dev/null
+          fixture="$RUNNER_TEMP/magma-fixture"
+          container="calculator-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            status=$?
+            if (( status != 0 )); then
+              echo '::error::Candidate blocked or failed under the production container limits and scoped delegation prerequisite.'
+              docker logs --tail 100 "$container" 2>&1 || true
+            fi
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$container" \
+            --cap-add SYS_ADMIN --memory 3g --pids-limit 320 \
+            --tmpfs /tmp:size=128m --tmpfs /data \
+            --mount "type=bind,source=$fixture,target=/opt/magma,readonly" \
+            --publish 127.0.0.1:18080:8080 \
+            "$IMAGE_ID" >/dev/null
+          ready=0
+          for attempt in $(seq 1 40); do
+            if curl --silent --fail http://127.0.0.1:18080/health > /dev/null; then
+              ready=1
+              break
+            fi
+            if [[ "$(docker inspect "$container" --format '{{.State.Running}}')" != true ]]; then break; fi
+            sleep 0.5
+          done
+          (( ready == 1 ))
+          status=$(curl --silent --show-error --output "$RUNNER_TEMP/canary-response.json" \
+            --write-out '%{http_code}' --max-time 15 \
+            --header 'Content-Type: application/json' \
+            --data '{"code":"CALC_PROBE answer"}' \
+            http://127.0.0.1:18080/execute)
+          [[ "$status" == 200 ]]
+          python3 - "$RUNNER_TEMP/canary-response.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as response:
+              body = json.load(response)
+          assert body["success"] is True, body
+          assert body["exit_code"] == 0, body
+          assert body["stdout"] == "PROBE answer OK 42\n", body
+          PY
 
-      - name: Log in to GHCR
-        if: env.PUBLISH == 'true'
-        uses: docker/login-action@v3
+  containment:
+    needs: [build, canary]
+    uses: ./.github/workflows/containment.yml
+    with:
+      artifact_name: calculator-candidate
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'Magma-Maths'
+    needs: [build, canary, containment]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: calculator-candidate
+          path: ${{ runner.temp }}/calculator-candidate
+      - name: Verify and load the gated archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/calculator-candidate"
+          mapfile -t lines < calculator-image.env
+          (( ${#lines[@]} == 2 ))
+          [[ "${lines[0]}" =~ ^ARCHIVE_SHA256=([a-f0-9]{64})$ ]]
+          archive_sha="${BASH_REMATCH[1]}"
+          [[ "${lines[1]}" =~ ^IMAGE_ID=(sha256:[a-f0-9]{64})$ ]]
+          image_id="${BASH_REMATCH[1]}"
+          echo "$archive_sha  calculator-image.tar" | sha256sum --check --status
+          docker load --input calculator-image.tar
+          [[ "$(docker image inspect calculator:candidate --format '{{.Id}}')" == "$image_id" ]]
+          echo "IMAGE_ID=$image_id" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute the short commit tag
-        id: tag
-        # promote.yml looks up sha-<first 7 hex chars>; the length must match here.
-        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ env.PUBLISH == 'true' }}
-          tags: |
-            ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
-            ${{ env.IMAGE }}:main
-          cache-from: type=gha
-          # mode=max also caches the nsjail-builder stage, which the final image does not contain.
-          # Only main writes the cache: a fork pull request has no permission to.
-          cache-to: ${{ env.PUBLISH == 'true' && 'type=gha,mode=max' || '' }}
+      - name: Publish the verified image ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA:0:7}"
+          docker tag "$IMAGE_ID" "$IMAGE:sha-$short"
+          docker tag "$IMAGE_ID" "$IMAGE:main"
+          docker push "$IMAGE:sha-$short" | tee "$RUNNER_TEMP/sha-push.log"
+          docker push "$IMAGE:main" | tee "$RUNNER_TEMP/main-push.log"
+          digest=$(awk '/digest: sha256:/ {print $3}' "$RUNNER_TEMP/sha-push.log" | tail -1)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf '%s:sha-%s %s\n' "$IMAGE" "$short" "$digest" >> "$GITHUB_STEP_SUMMARY"
