@@ -4,6 +4,8 @@ services:
     container_name: magma-calculator
     cap_add:
       - SYS_ADMIN
+    mem_limit: 3g
+    pids_limit: 320
     tmpfs:
       - /tmp:size=128m
     volumes:

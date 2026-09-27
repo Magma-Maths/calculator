@@ -133,9 +133,11 @@ Edit `calculator.env`. Key settings:
 | `MAGMA_TIMEOUT` | 120 | Wall-clock timeout (seconds) |
 | `MAGMA_CPU_TIMEOUT` | 120 | CPU time limit (seconds) |
 | `MAGMA_MEMORY_MB` | 400 | Memory limit (MB) |
+| `MAGMA_PIDS_MAX` | 64 | Processes and threads per execution |
+| `MAGMA_CPU_MS_PER_SEC` | 1000 | CPU quota per execution, in milliseconds per second |
 | `MAGMA_INPUT_KB` | 50 | Max input size (KB) |
 | `MAGMA_OUTPUT_KB` | 20 | Max output size (KB) |
-| `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
+| `MAX_CONCURRENT` | 4 | Simultaneous execution slots; memory and task budgets must fit the outer caps |
 | `PORT` | 8080 | Listen port inside container |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
@@ -207,9 +209,16 @@ Each Magma process runs inside an nsjail sandbox with:
 - **No network access**: `clone_newnet` creates an empty network namespace
 - **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
 - **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
-- **cgroup limits**: memory and CPU enforced at the kernel level
+- **cgroup configuration**: each child requests memory, process/thread, and CPU-rate limits. The bootstrap checks the 3 GiB and 320-task outer caps, available cgroup v2 controllers, and limit writes before starting the API. These checks do not prove that nsjail places children under the capped container cgroup.
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
+
+The container runtime must provide a writable cgroup v2 root scoped to this container,
+with `memory`, `pids`, and `cpu` delegated. The current Compose files set outer caps,
+but host delegation and child ancestry still need fixture-host verification before
+resource enforcement can be claimed. The bootstrap exits before the API listens when
+its local checks fail. The default four slots reserve 1 GiB and 64 tasks for the API;
+larger per-child or concurrency settings require corresponding outer caps and budget checks.
 
 ## Development
 
