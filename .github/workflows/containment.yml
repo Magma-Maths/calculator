@@ -1,0 +1,95 @@
+name: Containment acceptance
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: Candidate archive artifact from this workflow run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/calculator-candidate
+      - name: Verify and load the candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          blocked() {
+            echo "::error::BLOCKED: $*"
+            exit 1
+          }
+          cd "$RUNNER_TEMP/calculator-candidate"
+          [[ -f calculator-image.env ]] || blocked 'candidate metadata is missing'
+          [[ -f calculator-image.tar ]] || blocked 'candidate archive is missing'
+          mapfile -t lines < calculator-image.env
+          (( ${#lines[@]} == 2 )) || blocked 'candidate metadata must contain exactly two lines'
+          [[ "${lines[0]}" =~ ^ARCHIVE_SHA256=([a-f0-9]{64})$ ]] || blocked 'archive hash is malformed'
+          archive_sha="${BASH_REMATCH[1]}"
+          [[ "${lines[1]}" =~ ^IMAGE_ID=(sha256:[a-f0-9]{64})$ ]] || blocked 'image ID is malformed'
+          image_id="${BASH_REMATCH[1]}"
+          echo "$archive_sha  calculator-image.tar" | sha256sum --check --status || blocked 'candidate archive hash differs from metadata'
+          docker load --input calculator-image.tar || blocked 'candidate archive cannot be loaded'
+          loaded_id=$(docker image inspect calculator:candidate --format '{{.Id}}') || blocked 'loaded candidate tag is missing'
+          [[ "$loaded_id" == "$image_id" ]] || blocked 'loaded image ID differs from metadata'
+          {
+            echo "CONTAINMENT_ARCHIVE_SHA256=$archive_sha"
+            echo "CONTAINMENT_IMAGE_ID=$image_id"
+          } >> "$GITHUB_ENV"
+          printf 'Candidate archive SHA-256: `%s`\n\nCandidate image ID: `%s`\n' "$archive_sha" "$image_id" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compile the external static fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          blocked() {
+            echo "::error::BLOCKED: $*"
+            exit 1
+          }
+          fixture="$RUNNER_TEMP/magma-fixture"
+          mkdir -p "$fixture/versions/probe"
+          cc -O2 -static -pthread -Wall -Wextra -Werror \
+            tests/fixtures/containment_probe.c \
+            -o "$fixture/versions/probe/magma.exe" \
+            || blocked 'the runner cannot compile the static containment fixture'
+          readelf -l "$fixture/versions/probe/magma.exe" > "$RUNNER_TEMP/probe-program-headers.txt"
+          readelf -d "$fixture/versions/probe/magma.exe" > "$RUNNER_TEMP/probe-dynamic-section.txt"
+          ! grep -q INTERP "$RUNNER_TEMP/probe-program-headers.txt" || blocked 'fixture contains a program interpreter'
+          ! grep -q NEEDED "$RUNNER_TEMP/probe-dynamic-section.txt" || blocked 'fixture contains a dynamic dependency'
+          ln -s versions/probe "$fixture/current"
+          echo "CONTAINMENT_FIXTURE_ROOT=$fixture" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+      - run: poetry install --no-interaction
+      - name: Run real-image containment acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          blocked() {
+            echo "::error::BLOCKED: $*"
+            exit 1
+          }
+          sudo -n true || blocked 'root procfs and cgroup observation is unavailable'
+          observer_python=$(poetry run python -c 'import sys; print(sys.executable)')
+          sudo -n \
+            --preserve-env=CONTAINMENT_ARCHIVE_SHA256,CONTAINMENT_IMAGE_ID,CONTAINMENT_FIXTURE_ROOT \
+            "$observer_python" -m pytest -q -s -p no:cacheprovider tests/containment
