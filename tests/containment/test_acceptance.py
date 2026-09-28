@@ -322,7 +322,7 @@ def test_timeout_removes_live_descendant_before_its_natural_exit(controller: Doc
             candidates = [
                 identity
                 for identity in watch.recorded_members()
-                if "/opt/magma/current/magma.exe" in identity.command
+                if controller.is_fixture_process(identity)
                 and len(identity.nspid) >= 2
                 and identity.still_exists()
             ]

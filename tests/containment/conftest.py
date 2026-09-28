@@ -329,8 +329,11 @@ class CgroupWatch:
 
     def counter_delta(self, source: str, key: str) -> int:
         maximum = 0
+        observed_paths = self.request_paths
+        if source == "memory_events":
+            observed_paths.add(self.root)
         for path, samples in self.states.items():
-            if path not in self.request_paths:
+            if path not in observed_paths:
                 continue
             baseline = self.baseline.get(path)
             initial = getattr(baseline, source).get(key, 0) if baseline else 0
@@ -535,6 +538,9 @@ class DockerController:
         self.image_id = image_id
         self.archive_sha = archive_sha
         self.fixture_root = fixture_root.resolve()
+        selected_fixture = (self.fixture_root / "current").resolve()
+        fixture_version = selected_fixture.relative_to(self.fixture_root)
+        self.fixture_executable = str(Path("/opt/magma") / fixture_version / "magma.exe")
         suffix = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.prefix = f"calculator-containment-{suffix}"
         self.container = f"{self.prefix}-service"
@@ -779,12 +785,13 @@ class DockerController:
             counters = _key_values(self.service_cgroup / filename)
             if required_key not in counters:
                 raise ContainmentBlocked(f"required cgroup counter is unreadable: {filename}")
-        version = self.docker(
-            ["run", "--rm", "--entrypoint", "/usr/local/bin/nsjail", self.image_id, "--version"],
+        help_result = self.docker(
+            ["run", "--rm", "--entrypoint", "/usr/local/bin/nsjail", self.image_id, "-h"],
             check=False,
         )
-        if version.returncode != 0 or "nsjail" not in (version.stdout + version.stderr).lower():
-            raise ContainmentBlocked("verified image cannot report the real nsjail version")
+        help_text = help_result.stdout + help_result.stderr
+        if help_result.returncode != 0 or "usage:" not in help_text.lower() or "nsjail" not in help_text.lower():
+            raise ContainmentBlocked("verified image cannot report the real nsjail help banner")
         header = self.docker(
             [
                 "run",
@@ -809,7 +816,7 @@ class DockerController:
                     "init_pid": self.init_pid,
                     "service_cgroup": str(self.service_cgroup),
                     "cap_eff": f"{effective:016x}",
-                    "nsjail_version": (version.stdout + version.stderr).strip(),
+                    "nsjail_help_banner": help_text.splitlines()[0],
                 },
                 sort_keys=True,
             ),
@@ -891,12 +898,16 @@ class DockerController:
                 identities.append(identity)
         return identities
 
+    def is_fixture_process(self, identity: ProcessIdentity) -> bool:
+        command = identity.command.split()
+        return bool(command) and command[0] == self.fixture_executable
+
     def wait_for_abstract_listener(self, nonce: str, *, timeout: float = 2) -> ProcessIdentity:
         marker = f"@calc-probe-{nonce}"
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for identity in self.live_service_processes():
-                if "/opt/magma/current/magma.exe" not in identity.command:
+                if not self.is_fixture_process(identity):
                     continue
                 try:
                     sockets = _read_text(Path(f"/proc/{identity.pid}/net/unix"))
@@ -912,7 +923,7 @@ class DockerController:
         marker = f"calc-probe-{nonce}"
         while time.monotonic() < deadline:
             for identity in self.live_service_processes():
-                if "/opt/magma/current/magma.exe" not in identity.command:
+                if not self.is_fixture_process(identity):
                     continue
                 path = Path(f"/proc/{identity.pid}/root/tmp/{marker}")
                 try:
@@ -935,7 +946,7 @@ class DockerController:
         while time.monotonic() < deadline:
             processes = self.live_service_processes()
             fixture = next(
-                (process for process in processes if "/opt/magma/current/magma.exe" in process.command),
+                (process for process in processes if self.is_fixture_process(process)),
                 None,
             )
             nsjail = next(
