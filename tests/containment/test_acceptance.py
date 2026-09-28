@@ -10,9 +10,11 @@ from conftest import (
     DockerController,
     EXPECTED_CPU_MAX,
     EXPECTED_MEMORY_MAX,
+    EXPECTED_MEMORY_SWAP_MAX,
     EXPECTED_PIDS_MAX,
     NetworkSinks,
     parse_probe,
+    parse_probe_line,
     read_cgroup,
     require_success,
 )
@@ -49,8 +51,33 @@ def require_limits(watch: CgroupWatch) -> None:
     watch.require_request_paths()
     assert watch.saw_limits(
         str(EXPECTED_MEMORY_MAX),
+        EXPECTED_MEMORY_SWAP_MAX,
         str(EXPECTED_PIDS_MAX),
         EXPECTED_CPU_MAX,
+    )
+
+
+def observe_live_descendant(
+    controller: DockerController,
+    watch: CgroupWatch,
+    observation_deadline: float,
+):
+    while time.monotonic() < observation_deadline:
+        candidates = [
+            identity
+            for identity in watch.recorded_members()
+            if controller.is_fixture_process(identity)
+            and len(identity.nspid) >= 2
+            and identity.still_exists()
+        ]
+        by_pid = {identity.pid: identity for identity in candidates}
+        for child in candidates:
+            parent = by_pid.get(child.ppid)
+            if parent is not None:
+                return parent, child
+        time.sleep(0.01)
+    raise ContainmentBlocked(
+        "fixture parent and child ancestry were not visible while the request ran"
     )
 
 
@@ -221,9 +248,19 @@ def test_memory_limit_kills_the_probe_and_increments_cgroup_events(
         watch.counter_delta("memory_events", "oom"),
         watch.counter_delta("memory_events", "oom_kill"),
     ) > 0
+    swap_limits = sorted(
+        {
+            sample.memory_swap_max
+            for path, samples in watch.states.items()
+            if path in watch.request_paths
+            for sample in samples
+            if sample.memory_swap_max is not None
+        }
+    )
     evidence(
         "memory",
         requested_mib=512,
+        memory_swap_max=swap_limits,
         exit_code=response.body["exit_code"],
         oom=watch.counter_delta("memory_events", "oom"),
         oom_kill=watch.counter_delta("memory_events", "oom_kill"),
@@ -314,30 +351,8 @@ def test_timeout_removes_live_descendant_before_its_natural_exit(controller: Doc
     natural_deadline = started + 8
     watch = controller.watch()
     request = controller.execute_async("descendant_hold", "8000", timeout=10)
-    parent = None
-    child = None
     try:
-        observation_deadline = started + 2
-        while time.monotonic() < observation_deadline and child is None:
-            candidates = [
-                identity
-                for identity in watch.recorded_members()
-                if controller.is_fixture_process(identity)
-                and len(identity.nspid) >= 2
-                and identity.still_exists()
-            ]
-            by_pid = {identity.pid: identity for identity in candidates}
-            for candidate in candidates:
-                possible_parent = by_pid.get(candidate.ppid)
-                if possible_parent is not None:
-                    parent = possible_parent
-                    child = candidate
-                    break
-            time.sleep(0.01)
-        if parent is None or child is None:
-            raise ContainmentBlocked(
-                "fixture parent and child ancestry were not visible while the request ran"
-            )
+        parent, child = observe_live_descendant(controller, watch, started + 2)
         response = request.result(timeout=8)
     finally:
         watch.stop()
@@ -363,7 +378,58 @@ def test_timeout_removes_live_descendant_before_its_natural_exit(controller: Doc
         state = read_cgroup(Path(path))
         assert state is None or not state.members, (path, state)
     evidence(
-        "descendants",
+        "timeout_descendants",
+        parent_pid=parent.pid,
+        parent_start_time=parent.start_time,
+        parent_nspid=parent.nspid,
+        child_pid=child.pid,
+        child_start_time=child.start_time,
+        child_nspid=child.nspid,
+        cgroup=child.cgroup,
+        api_elapsed=response.elapsed,
+        error=response.body.get("error"),
+        warnings=response.body.get("warnings"),
+    )
+    controller.answer()
+
+
+def test_output_overflow_removes_live_descendant_before_natural_exit(
+    output_cleanup_controller: DockerController,
+):
+    controller = output_cleanup_controller
+    started = time.monotonic()
+    natural_deadline = started + 8
+    watch = controller.watch()
+    request = controller.execute_async("descendant_flood", timeout=10)
+    try:
+        parent, child = observe_live_descendant(controller, watch, started + 2)
+        response = request.result(timeout=8)
+    finally:
+        watch.stop()
+
+    require_limits(watch)
+    assert_output_failure(response, "combined capture ceiling")
+    assert time.monotonic() < natural_deadline
+    stdout = response.body.get("stdout", "")
+    assert isinstance(stdout, str) and stdout.splitlines(), response.body
+    record = parse_probe_line(stdout.splitlines()[0], "descendant_flood")
+    assert record.status == "OK", response.body
+    assert record.integer("hold_ms") == 8000
+    assert record.integer("observe_ms") == 2000
+    assert record.integer("child_pid") == child.nspid[-1]
+    assert child.ppid == parent.pid
+    assert parent.cgroup == child.cgroup
+
+    while time.monotonic() < natural_deadline and (parent.still_exists() or child.still_exists()):
+        time.sleep(0.02)
+    assert time.monotonic() < natural_deadline
+    assert not parent.still_exists()
+    assert not child.still_exists()
+    for path in watch.request_paths:
+        state = read_cgroup(Path(path))
+        assert state is None or not state.members, (path, state)
+    evidence(
+        "output_descendants",
         parent_pid=parent.pid,
         parent_start_time=parent.start_time,
         parent_nspid=parent.nspid,

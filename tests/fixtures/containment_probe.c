@@ -380,9 +380,7 @@ static void cpu_burn(void) {
     result(mode, error ? "DENIED" : "OK", fields);
 }
 
-static void flood(int fd) {
-    need_argument();
-    unsigned bytes = number(argument, 1, 1024 * 1024 - 128);
+static unsigned flood_bytes(int fd, unsigned bytes) {
     char block[4096];
     memset(block, 'A', sizeof(block));
     unsigned written = 0;
@@ -392,6 +390,13 @@ static void flood(int fd) {
         if (n <= 0) { if (n == 0) errno = EIO; break; }
         written += (unsigned)n;
     }
+    return written;
+}
+
+static void flood(int fd) {
+    need_argument();
+    unsigned bytes = number(argument, 1, 1024 * 1024 - 128);
+    unsigned written = flood_bytes(fd, bytes);
     char fields[96];
     snprintf(fields, sizeof(fields), "requested=%u written=%u errno=%d",
              bytes, written, written == bytes ? 0 : errno);
@@ -416,6 +421,45 @@ static void descendant_hold(void) {
     waitpid(child, NULL, 0);
 }
 
+static void wait_child_until(pid_t child, long long deadline) {
+    while (now_ms() < deadline) {
+        pid_t waited = waitpid(child, NULL, WNOHANG);
+        if (waited == child || (waited < 0 && errno == ECHILD)) return;
+        if (waited < 0 && errno != EINTR) return;
+        long long remaining = deadline - now_ms();
+        if (remaining > 0) pause_ms((unsigned)(remaining < 10 ? remaining : 10));
+    }
+    kill(child, SIGKILL);
+    while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+static void descendant_flood(void) {
+    no_argument();
+    long long started = now_ms();
+    long long deadline = started + 8000;
+    pid_t child = fork();
+    if (child < 0) {
+        char fields[64];
+        snprintf(fields, sizeof(fields), "operation=fork errno=%d", errno);
+        result(mode, "DENIED", fields);
+        return;
+    }
+    if (child == 0) {
+        long long remaining = deadline - now_ms();
+        if (remaining > 0) pause_ms((unsigned)remaining);
+        _exit(0);
+    }
+    char fields[128];
+    snprintf(fields, sizeof(fields),
+             "child_pid=%ld hold_ms=8000 observe_ms=2000 started_ms=%lld",
+             (long)child, started);
+    result(mode, "OK", fields);
+    long long observation_remaining = started + 2000 - now_ms();
+    if (observation_remaining > 0) pause_ms((unsigned)observation_remaining);
+    flood_bytes(STDOUT_FILENO, 300 * 1024);
+    wait_child_until(child, deadline);
+}
+
 int main(int argc, char **argv) {
     if (argc != 3 || strcmp(argv[1], "-w") || strcmp(argv[2], "-n")) invalid();
     parse_request();
@@ -436,6 +480,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(mode, "stdout_flood")) flood(STDOUT_FILENO);
     else if (!strcmp(mode, "stderr_flood")) flood(STDERR_FILENO);
     else if (!strcmp(mode, "descendant_hold")) descendant_hold();
+    else if (!strcmp(mode, "descendant_flood")) descendant_flood();
     else invalid();
     return 0;
 }

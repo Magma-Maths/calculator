@@ -22,6 +22,7 @@ SHA_RE = re.compile(r"^[a-f0-9]{64}$")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 REQUIRED_CONTROLLERS = {"cpu", "memory", "pids"}
 EXPECTED_MEMORY_MAX = 400 * 1024**2
+EXPECTED_MEMORY_SWAP_MAX = "0"
 EXPECTED_PIDS_MAX = 64
 EXPECTED_CPU_MAX = "1000000 1000000"
 OUTER_MEMORY_MAX = 3 * 1024**3
@@ -97,14 +98,10 @@ class ProbeRecord:
             raise AssertionError(f"invalid {name} in {self}") from exc
 
 
-def parse_probe(response: ApiResponse, expected_mode: str) -> ProbeRecord:
-    stdout = response.body.get("stdout")
-    assert isinstance(stdout, str), response.body
-    lines = stdout.rstrip("\n").splitlines()
-    assert len(lines) == 1, response.body
-    parts = lines[0].split()
-    assert len(parts) >= 3 and parts[0] == "PROBE", response.body
-    assert parts[1] == expected_mode, response.body
+def parse_probe_line(line: str, expected_mode: str) -> ProbeRecord:
+    parts = line.split()
+    assert len(parts) >= 3 and parts[0] == "PROBE", line
+    assert parts[1] == expected_mode, line
     fields: dict[str, str] = {}
     for field in parts[3:]:
         if "=" in field:
@@ -113,6 +110,14 @@ def parse_probe(response: ApiResponse, expected_mode: str) -> ProbeRecord:
         else:
             fields.setdefault("value", field)
     return ProbeRecord(parts[1], parts[2], fields)
+
+
+def parse_probe(response: ApiResponse, expected_mode: str) -> ProbeRecord:
+    stdout = response.body.get("stdout")
+    assert isinstance(stdout, str), response.body
+    lines = stdout.rstrip("\n").splitlines()
+    assert len(lines) == 1, response.body
+    return parse_probe_line(lines[0], expected_mode)
 
 
 def require_success(response: ApiResponse, mode: str) -> ProbeRecord:
@@ -228,6 +233,7 @@ class CgroupState:
     pids_events: dict[str, int]
     cpu_stat: dict[str, int]
     memory_max: str | None
+    memory_swap_max: str | None
     pids_max: str | None
     cpu_max: str | None
 
@@ -255,6 +261,7 @@ def read_cgroup(path: Path) -> CgroupState | None:
         pids_events=_key_values(path / "pids.events"),
         cpu_stat=_key_values(path / "cpu.stat"),
         memory_max=optional("memory.max"),
+        memory_swap_max=optional("memory.swap.max"),
         pids_max=optional("pids.max"),
         cpu_max=optional("cpu.max"),
     )
@@ -343,9 +350,16 @@ class CgroupWatch:
             )
         return maximum
 
-    def saw_limits(self, memory_max: str, pids_max: str, cpu_max: str) -> bool:
+    def saw_limits(
+        self,
+        memory_max: str,
+        memory_swap_max: str,
+        pids_max: str,
+        cpu_max: str,
+    ) -> bool:
         return any(
             sample.memory_max == memory_max
+            and sample.memory_swap_max == memory_swap_max
             and sample.pids_max == pids_max
             and sample.cpu_max == cpu_max
             for path, samples in self.states.items()
@@ -534,9 +548,17 @@ class NetworkSinks:
 
 
 class DockerController:
-    def __init__(self, image_id: str, archive_sha: str, fixture_root: Path):
+    def __init__(
+        self,
+        image_id: str,
+        archive_sha: str,
+        fixture_root: Path,
+        *,
+        magma_timeout: int = 2,
+    ):
         self.image_id = image_id
         self.archive_sha = archive_sha
+        self.magma_timeout = magma_timeout
         self.fixture_root = fixture_root.resolve()
         selected_fixture = (self.fixture_root / "current").resolve()
         fixture_version = selected_fixture.relative_to(self.fixture_root)
@@ -554,7 +576,7 @@ class DockerController:
         self._jail_observation: tuple[dict[str, MountObservation], dict[str, str]] | None = None
 
     @classmethod
-    def from_environment(cls) -> "DockerController":
+    def from_environment(cls, *, magma_timeout: int = 2) -> "DockerController":
         image_id = os.environ.get("CONTAINMENT_IMAGE_ID", "")
         archive_sha = os.environ.get("CONTAINMENT_ARCHIVE_SHA256", "")
         fixture = os.environ.get("CONTAINMENT_FIXTURE_ROOT", "")
@@ -571,7 +593,7 @@ class DockerController:
             raise ContainmentBlocked(f"static fixture is missing or not executable: {binary}")
         if not current.is_symlink() or os.readlink(current) != "versions/probe":
             raise ContainmentBlocked("fixture current symlink does not select versions/probe")
-        return cls(image_id, archive_sha, fixture_root)
+        return cls(image_id, archive_sha, fixture_root, magma_timeout=magma_timeout)
 
     def __enter__(self) -> "DockerController":
         if os.geteuid() != 0:
@@ -609,7 +631,7 @@ class DockerController:
                 "--publish",
                 "127.0.0.1::8080",
                 "--env",
-                "MAGMA_TIMEOUT=2",
+                f"MAGMA_TIMEOUT={self.magma_timeout}",
                 "--env",
                 "MAGMA_CPU_TIMEOUT=10",
                 "--env",
@@ -1014,6 +1036,23 @@ def controller():
     instance: DockerController | None = None
     try:
         instance = DockerController.from_environment()
+        with instance:
+            yield instance
+    except ContainmentBlocked as exc:
+        pytest.fail(f"BLOCKED: {exc}", pytrace=False)
+    finally:
+        if instance is not None:
+            try:
+                instance.cleanup()
+            except ContainmentBlocked:
+                pass
+
+
+@pytest.fixture
+def output_cleanup_controller():
+    instance: DockerController | None = None
+    try:
+        instance = DockerController.from_environment(magma_timeout=10)
         with instance:
             yield instance
     except ContainmentBlocked as exc:

@@ -94,6 +94,7 @@ def _check_controls(root: Path, fs: CgroupFiles, pid: int) -> None:
     try:
         limits = {
             "memory.max": str(400 * 1024**2),
+            "memory.swap.max": "0",
             "pids.max": "64",
             "cpu.max": "1000000 1000000",
         }

@@ -12,16 +12,25 @@ def controller_without_init(**attributes):
     return controller
 
 
-def cgroup_state(path: Path, *, memory_events=None):
+def cgroup_state(
+    path: Path,
+    *,
+    memory_events=None,
+    memory_max=None,
+    memory_swap_max=None,
+    pids_max=None,
+    cpu_max=None,
+):
     return containment.CgroupState(
         path=path,
         members=(),
         memory_events=memory_events or {},
         pids_events={},
         cpu_stat={},
-        memory_max=None,
-        pids_max=None,
-        cpu_max=None,
+        memory_max=memory_max,
+        memory_swap_max=memory_swap_max,
+        pids_max=pids_max,
+        cpu_max=cpu_max,
     )
 
 
@@ -136,3 +145,79 @@ def test_hierarchical_oom_event_survives_request_cgroup_removal():
     }
 
     assert watch.counter_delta("memory_events", "oom_kill") == 1
+
+
+def test_request_limit_observation_requires_zero_swap():
+    root = Path("/sys/fs/cgroup/calculator")
+    request = root / "NSJAIL.456"
+    watch = object.__new__(containment.CgroupWatch)
+    watch.root = root
+    watch.baseline = {}
+    watch.states = {
+        request: [
+            cgroup_state(
+                request,
+                memory_max=str(containment.EXPECTED_MEMORY_MAX),
+                memory_swap_max="max",
+                pids_max=str(containment.EXPECTED_PIDS_MAX),
+                cpu_max=containment.EXPECTED_CPU_MAX,
+            )
+        ]
+    }
+
+    assert not watch.saw_limits(
+        str(containment.EXPECTED_MEMORY_MAX),
+        "0",
+        str(containment.EXPECTED_PIDS_MAX),
+        containment.EXPECTED_CPU_MAX,
+    )
+
+    watch.states[request] = [
+        cgroup_state(
+            request,
+            memory_max=str(containment.EXPECTED_MEMORY_MAX),
+            memory_swap_max="0",
+            pids_max=str(containment.EXPECTED_PIDS_MAX),
+            cpu_max=containment.EXPECTED_CPU_MAX,
+        )
+    ]
+    assert watch.saw_limits(
+        str(containment.EXPECTED_MEMORY_MAX),
+        "0",
+        str(containment.EXPECTED_PIDS_MAX),
+        containment.EXPECTED_CPU_MAX,
+    )
+
+
+def test_controller_starts_service_with_requested_timeout(tmp_path, monkeypatch):
+    fixture_root = tmp_path / "magma-fixture"
+    (fixture_root / "versions" / "probe").mkdir(parents=True)
+    (fixture_root / "current").symlink_to("versions/probe")
+    controller = containment.DockerController(
+        "sha256:" + "1" * 64,
+        "2" * 64,
+        fixture_root,
+        magma_timeout=10,
+    )
+    docker_calls = []
+
+    def fake_docker(args, *, check=False):
+        docker_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    controller.docker = fake_docker
+    controller._resolve_runtime = lambda: None
+    controller._wait_ready = lambda: None
+    controller._check_runtime = lambda: None
+    controller.answer = lambda: None
+    controller.jail_observation = lambda: None
+    monkeypatch.setattr(containment.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(containment.shutil, "which", lambda _name: "/usr/bin/docker")
+
+    try:
+        assert controller.__enter__() is controller
+    finally:
+        controller._executor.shutdown()
+
+    run_call = next(call for call in docker_calls if call[:2] == ["run", "-d"])
+    assert "MAGMA_TIMEOUT=10" in run_call

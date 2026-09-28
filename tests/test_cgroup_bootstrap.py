@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.cgroup_bootstrap import main
 from app.config import Settings
 
@@ -15,6 +17,7 @@ def test_resource_configuration_contract():
     assert 'cgroupv2_mount: "/sys/fs/cgroup"' in jail
     assert "use_cgroupv2: true" in jail
     assert "detect_cgroupv2: false" in jail
+    assert "cgroup_mem_swap_max: 0" in jail
     assert "cgroup_mem_parent" not in jail
     assert "cgroup_pids_parent" not in jail
     assert "cgroup_cpu_parent" not in jail
@@ -25,9 +28,19 @@ def test_resource_configuration_contract():
 
 
 class FakeCgroupFiles:
-    def __init__(self, root: Path, *, controllers: str = "memory pids cpu", probe_writable=True):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        controllers: str = "memory pids cpu",
+        probe_writable=True,
+        swap_write_sticks=True,
+    ):
         self.root = root
         self.probe_writable = probe_writable
+        self.swap_write_sticks = swap_write_sticks
+        self.directories = {root}
+        self.writes = []
         self.files = {
             root / "memory.max": str(3 * 1024**3),
             root / "pids.max": "320",
@@ -46,6 +59,9 @@ class FakeCgroupFiles:
     def write(self, path: Path, value: str) -> None:
         if path.parent.name.startswith("bootstrap-check-") and not self.probe_writable:
             raise PermissionError("controller is not delegated")
+        self.writes.append((path, value))
+        if path.name == "memory.swap.max" and not self.swap_write_sticks:
+            return
         if path == self.root / "cgroup.subtree_control":
             value = value.replace("+", "")
         if path == self.root / "api" / "cgroup.procs":
@@ -53,8 +69,9 @@ class FakeCgroupFiles:
         self.files[path] = value
 
     def mkdir(self, path: Path) -> None:
+        self.directories.add(path)
         if path.name.startswith("bootstrap-check-"):
-            for name in ("memory.max", "pids.max", "cpu.max"):
+            for name in ("memory.max", "memory.swap.max", "pids.max", "cpu.max"):
                 self.files[path / name] = "max"
         else:
             self.files[path / "cgroup.procs"] = ""
@@ -63,6 +80,14 @@ class FakeCgroupFiles:
         for file in list(self.files):
             if file.parent == path:
                 del self.files[file]
+        self.directories.discard(path)
+
+
+def assert_no_bootstrap_probe(fs: FakeCgroupFiles) -> None:
+    leaked = sorted(
+        path.name for path in fs.directories if path.name.startswith("bootstrap-check-")
+    )
+    assert not leaked, f"bootstrap probe directories remain: {leaked}"
 
 
 def run_fake_bootstrap(root: Path, fs: FakeCgroupFiles, **settings_overrides):
@@ -133,6 +158,24 @@ def test_bootstrap_stops_when_limit_write_fails(tmp_path, capsys):
     assert "controller is not delegated" in capsys.readouterr().err
 
 
+def test_bootstrap_stops_when_zero_swap_readback_differs(tmp_path, capsys):
+    fs = FakeCgroupFiles(tmp_path, swap_write_sticks=False)
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    assert status == 1
+    assert calls == []
+    assert "memory.swap.max write did not stick" in capsys.readouterr().err
+    assert_no_bootstrap_probe(fs)
+
+
+def test_probe_cleanup_assertion_rejects_a_leaked_directory(tmp_path):
+    fs = FakeCgroupFiles(tmp_path)
+    fs.directories.add(tmp_path / "bootstrap-check-leaked")
+
+    with pytest.raises(AssertionError, match="bootstrap-check-leaked"):
+        assert_no_bootstrap_probe(fs)
+
+
 def test_bootstrap_execs_after_probe(tmp_path):
     fs = FakeCgroupFiles(tmp_path)
     status, calls = run_fake_bootstrap(tmp_path, fs)
@@ -140,4 +183,8 @@ def test_bootstrap_execs_after_probe(tmp_path):
     assert status == 0
     assert len(calls) == 1
     assert calls[0][1][-2:] == ["-m", "app.main"]
-    assert not any(path.name.startswith("bootstrap-check-") for path in fs.files)
+    assert any(
+        path.name == "memory.swap.max" and value == "0"
+        for path, value in fs.writes
+    )
+    assert_no_bootstrap_probe(fs)

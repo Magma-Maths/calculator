@@ -209,7 +209,7 @@ Each Magma process runs inside an nsjail sandbox with:
 - **No network access**: `clone_newnet` creates an empty network namespace
 - **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
 - **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
-- **cgroup configuration**: each child requests memory, process/thread, and CPU-rate limits. The bootstrap checks the 3 GiB and 320-task outer caps, available cgroup v2 controllers, and limit writes before starting the API. These checks do not prove that nsjail places children under the capped container cgroup.
+- **cgroup configuration**: each child requests a memory limit with zero swap, plus process/thread and CPU-rate limits. Before starting the API, the bootstrap checks the 3 GiB and 320-task outer caps. It also checks cgroup v2 controller availability and limit writes. These checks do not prove that nsjail places children under the capped container cgroup.
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
 

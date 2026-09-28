@@ -1,7 +1,10 @@
 import os
+import re
 import secrets
+import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -65,3 +68,37 @@ def test_tmp_exec_reports_completed_exec(probe):
     assert result.stdout.endswith(
         f"quit.\nPROBE tmp_exec OK nonce={nonce} operation=copy_exec errno=0\n".encode()
     )
+
+
+def test_descendant_flood_reports_child_before_bounded_overflow(probe):
+    started = time.monotonic()
+    process = subprocess.Popen(
+        [str(probe), "-w", "-n"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate(
+                input=b"CALC_PROBE descendant_flood\n",
+                timeout=3,
+            )
+        except subprocess.TimeoutExpired as exc:
+            match = re.search(rb"child_pid=(\d+)", exc.output or b"")
+            assert match is not None, exc.output
+            os.kill(int(match.group(1)), signal.SIGKILL)
+            stdout, stderr = process.communicate(timeout=1)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=1)
+
+    assert time.monotonic() - started < 4
+    assert process.returncode == 0
+    assert stderr == b""
+    assert b"PROBE descendant_flood OK child_pid=" in stdout[:512]
+    assert b"hold_ms=8000 observe_ms=2000" in stdout[:512]
+    assert len(stdout) > 256 * 1024
+    assert len(stdout) <= 1024 * 1024
