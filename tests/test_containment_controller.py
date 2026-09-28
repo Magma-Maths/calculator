@@ -1,8 +1,71 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from tests.containment import conftest as containment
+
+
+def test_acceptance_body_reports_missing_evidence_as_blocked(tmp_path):
+    containment_root = Path(__file__).parent / "containment"
+    script = tmp_path / "test_missing_evidence.py"
+    script.write_text(
+        """
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(CONTAINMENT_ROOT)
+conftest_spec = importlib.util.spec_from_file_location("conftest", root / "conftest.py")
+conftest = importlib.util.module_from_spec(conftest_spec)
+sys.modules["conftest"] = conftest
+conftest_spec.loader.exec_module(conftest)
+acceptance_spec = importlib.util.spec_from_file_location("acceptance", root / "test_acceptance.py")
+acceptance = importlib.util.module_from_spec(acceptance_spec)
+acceptance_spec.loader.exec_module(acceptance)
+
+
+class Controller:
+    def jail_observation(self):
+        mount = conftest.MountObservation
+        return {
+            "/opt/magma": mount("/opt/magma", frozenset({"ro"}), "overlay", "none"),
+            "/usr/lib": mount("/usr/lib", frozenset({"ro"}), "overlay", "none"),
+            "/lib": mount("/lib", frozenset({"ro"}), "overlay", "none"),
+            "/tmp": mount("/tmp", frozenset({"rw", "nosuid", "nodev", "noexec"}), "tmpfs", "tmpfs"),
+            "/unchecked": mount("/unchecked", frozenset({"rw"}), "ext4", "/dev/vda"),
+        }, {}
+
+    def execute(self, *_args):
+        raise AssertionError("the missing-evidence path must stop before a probe request")
+
+
+def test_missing_evidence():
+    acceptance.test_persistent_paths_are_read_only_and_tmp_is_noexec(Controller())
+
+
+def test_assertion_failure():
+    class IncompleteController(Controller):
+        def jail_observation(self):
+            mounts, namespaces = super().jail_observation()
+            mounts.pop("/tmp")
+            return mounts, namespaces
+
+    acceptance.test_persistent_paths_are_read_only_and_tmp_is_noexec(IncompleteController())
+""".replace("CONTAINMENT_ROOT", repr(str(containment_root))).lstrip(),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "BLOCKED: untested writable persistent mounts" in result.stdout + result.stderr
+    assert "AssertionError" in result.stdout + result.stderr
 
 
 def controller_without_init(**attributes):

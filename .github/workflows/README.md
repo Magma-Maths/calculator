@@ -4,7 +4,8 @@ One line per workflow. Read the file itself for details.
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | push to `main`, PR | `test` runs the pytest suite. `build` builds the image on both, and pushes it to `ghcr.io/magma-maths/calculator` as `sha-<short>` and the moving `main` only on a push to `main` in Magma-Maths. A pull request builds without logging in to GHCR or writing the cache, so it needs no secrets and a broken Dockerfile fails before the merge. |
+| `ci.yml` | push to `main`, PR | `test` runs the shared fake-only selection. `build` creates one candidate artifact, then canary and reusable containment verify it. `publish` waits for both checks and publishes that candidate only on a Magma-Maths `main` push. |
+| `containment.yml` | reusable workflow call | Runs real-image containment checks against the verified candidate artifact prepared by `ci.yml`. |
 | `promote.yml` | push of a `v*` tag (Magma-Maths only) | Retags the tagged commit's `sha-<short>` image as the version tag without rebuilding. Fails if the commit has no image; refuses if the version tag is already published. |
 
 ## The `sha-<short>` coupling

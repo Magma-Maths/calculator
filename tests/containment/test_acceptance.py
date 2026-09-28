@@ -4,6 +4,8 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
+
 from conftest import (
     CgroupWatch,
     ContainmentBlocked,
@@ -30,6 +32,10 @@ def evidence(property_name: str, **facts) -> None:
         + json.dumps({"property": property_name, **facts}, sort_keys=True),
         flush=True,
     )
+
+
+def block_missing_evidence(exc: ContainmentBlocked) -> None:
+    pytest.fail(f"BLOCKED: {exc}", pytrace=False)
 
 
 def observe_request(
@@ -197,6 +203,22 @@ def test_persistent_paths_are_read_only_and_tmp_is_noexec(controller: DockerCont
     assert "/tmp" in mounts
     assert {"rw", "nosuid", "nodev", "noexec"} <= mounts["/tmp"].options
 
+    persistent_filesystems = {"overlay", "ext2", "ext3", "ext4", "xfs", "btrfs"}
+    untested = [
+        mount.target
+        for mount in mounts.values()
+        if "rw" in mount.options
+        and mount.filesystem in persistent_filesystems
+        and not any(
+            mount.target == root or mount.target.startswith(root + "/")
+            for root in ("/", "/app", "/data", "/home/calculator")
+        )
+    ]
+    if untested:
+        block_missing_evidence(
+            ContainmentBlocked(f"untested writable persistent mounts: {sorted(untested)}")
+        )
+
     path_classes = ("root", "app", "data", "magma", "home", "usrlib", "lib")
     accepted_denials = {errno.EACCES, errno.EROFS, errno.ENOENT}
     for path_class in path_classes:
@@ -212,20 +234,6 @@ def test_persistent_paths_are_read_only_and_tmp_is_noexec(controller: DockerCont
     assert record.status == "DENIED", execution.body
     assert record.fields["operation"] == "copy_exec"
     assert record.integer("errno") == errno.EACCES
-
-    persistent_filesystems = {"overlay", "ext2", "ext3", "ext4", "xfs", "btrfs"}
-    untested = [
-        mount.target
-        for mount in mounts.values()
-        if "rw" in mount.options
-        and mount.filesystem in persistent_filesystems
-        and not any(
-            mount.target == root or mount.target.startswith(root + "/")
-            for root in ("/", "/app", "/data", "/home/calculator")
-        )
-    ]
-    if untested:
-        raise ContainmentBlocked(f"untested writable persistent mounts: {sorted(untested)}")
     evidence(
         "filesystem",
         path_classes=list(path_classes),
@@ -352,7 +360,10 @@ def test_timeout_removes_live_descendant_before_its_natural_exit(controller: Doc
     watch = controller.watch()
     request = controller.execute_async("descendant_hold", "8000", timeout=10)
     try:
-        parent, child = observe_live_descendant(controller, watch, started + 2)
+        try:
+            parent, child = observe_live_descendant(controller, watch, started + 2)
+        except ContainmentBlocked as exc:
+            block_missing_evidence(exc)
         response = request.result(timeout=8)
     finally:
         watch.stop()
@@ -402,7 +413,10 @@ def test_output_overflow_removes_live_descendant_before_natural_exit(
     watch = controller.watch()
     request = controller.execute_async("descendant_flood", timeout=10)
     try:
-        parent, child = observe_live_descendant(controller, watch, started + 2)
+        try:
+            parent, child = observe_live_descendant(controller, watch, started + 2)
+        except ContainmentBlocked as exc:
+            block_missing_evidence(exc)
         response = request.result(timeout=8)
     finally:
         watch.stop()

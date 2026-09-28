@@ -176,9 +176,13 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 ### 3c. Run without docker-compose (testing)
 
+Direct Docker use needs a prepared fixture host. It must provide a writable cgroup v2 root scoped to the container, with `memory`, `pids`, and `cpu` delegated and usable `memory.swap.max` accounting. The flags below set only the outer caps. No supported raw-Docker wiring establishes this prerequisite.
+
 ```bash
 docker run --rm \
   --cap-add SYS_ADMIN \
+  --memory 3g \
+  --pids-limit 320 \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
   -p 8080:8080 \
@@ -189,11 +193,13 @@ This runs the calculator on plain HTTP (port 8080) without Traefik or TLS.
 
 ### Running multiple instances
 
-Start a second container with different limits for long-running computations:
+Start a second container with long-running request settings:
 
 ```bash
 docker run --rm \
   --cap-add SYS_ADMIN \
+  --memory 3g \
+  --pids-limit 320 \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
   --env-file calculator-long.env \
@@ -213,16 +219,26 @@ Each Magma process runs inside an nsjail sandbox with:
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
 
-The container runtime must provide a writable cgroup v2 root scoped to this container,
-with `memory`, `pids`, and `cpu` delegated. The current Compose files set outer caps,
-but host delegation and child ancestry still need fixture-host verification before
-resource enforcement can be claimed. The bootstrap exits before the API listens when
-its local checks fail. The default four slots reserve 1 GiB and 64 tasks for the API;
-larger per-child or concurrency settings require corresponding outer caps and budget checks.
+Before startup, confirm that the container has a writable cgroup v2 root scoped to it,
+with `memory`, `pids`, and `cpu` delegated and usable `memory.swap.max` accounting.
+The current Compose files set outer caps, but host delegation and child ancestry still
+need fixture-host verification before resource enforcement can be claimed. The bootstrap
+exits before the API listens when its local checks fail. The default four slots reserve
+1 GiB and 64 tasks for the API; larger per-child or concurrency settings require
+corresponding outer caps and budget checks.
 
 ## Development
 
 ```bash
-poetry install           # install dependencies
-poetry run pytest -v     # run tests
+poetry install                     # install dependencies
+poetry run bash scripts/test-safe.sh  # fake-only tests shared with CI
+```
+
+The safe command does not collect the real-image containment suite or real-Magma tests.
+Real-image containment runs through `.github/workflows/containment.yml` after it prepares
+a verified candidate, static fixture, Docker access, and scoped cgroup delegation. Real-Magma
+tests require a reviewed Magma installation and execute Magma without nsjail:
+
+```bash
+poetry run pytest -v tests/test_integration.py -k real_
 ```
