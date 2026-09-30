@@ -9,6 +9,7 @@ The calculator runs from a prebuilt image, `ghcr.io/magma-maths/calculator`, tha
 - A server with a public IP
 - A domain (e.g. `calc.magma-maths.org`) with an A record pointing to that IP
 - Magma binaries (the server needs a licensed copy)
+- [Docker Compose 2.15.0 or later](https://docs.docker.com/reference/compose-file/services/#cgroup) for the private cgroup namespace setting
 
 ## 1. Install Docker
 
