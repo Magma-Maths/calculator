@@ -92,6 +92,11 @@ The installed profile is reloaded by AppArmor after reboot. Compose selects it
 explicitly; startup fails if it is unavailable. Validate containment on a
 nonproduction host before deploying a candidate to production.
 
+The profile permits mount operations used by the image's pinned nsjail and
+Debian tooling. Changes to the Debian base, nsjail pin, or mount utility require
+renewed canary and real-image containment checks on a host with AppArmor
+enforcement before rollout.
+
 ## 5. Start Traefik
 
 Traefik is the shared reverse proxy that handles HTTPS. You only set it up once per server; it can serve multiple apps.
