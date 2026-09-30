@@ -29,7 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for Magma (nsjail drops privileges to this user)
-RUN useradd -m calculator
+# nsjail selects the staging path using its original UID, after switching user.
+RUN useradd -m calculator && \
+    install -d -m 0700 -o calculator -g calculator /run/user/0/nsjail
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/local/bin/nsjail
 RUN ldd -r /usr/local/bin/nsjail > /tmp/nsjail-ldd && \

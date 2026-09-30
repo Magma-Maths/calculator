@@ -153,12 +153,12 @@ def main(
     try:
         _check_budget(configured)
         writable = _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root)
+        _require(
+            fs.read(Path("/proc/self/attr/current")) == f"{APPARMOR_PROFILE} (enforce)",
+            "startup requires the enforced magma-calculator AppArmor profile",
+        )
         if not writable:
             _check_outer_limits(root, fs)
-            _require(
-                fs.read(Path("/proc/self/attr/current")) == f"{APPARMOR_PROFILE} (enforce)",
-                "cgroup remount requires the enforced magma-calculator AppArmor profile",
-            )
             fs.remount_cgroup(root)
             _require(
                 _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root),

@@ -35,10 +35,10 @@ profile magma-calculator flags=(attach_disconnected,mediate_deleted) {
   umount /,
 
   # nsjail applies final flags after pivot_root, using paths inside the jail.
-  mount options in (ro,remount,bind,nosuid,nodev,relatime)
+  mount options in (ro,remount,bind,nosuid,nodev,relatime,noatime,nodiratime)
     -> /{opt/magma,usr/lib,usr/lib64,lib,lib64}/,
-  mount options in (ro,remount,bind,nosuid,nodev,relatime) -> /etc/ld.so.cache,
-  mount options in (rw,remount,bind,nosuid,nodev,noexec,relatime) -> /tmp/,
+  mount options in (ro,remount,bind,nosuid,nodev,relatime,noatime,nodiratime) -> /etc/ld.so.cache,
+  mount options in (rw,remount,bind,nosuid,nodev,noexec,relatime,noatime,nodiratime) -> /tmp/,
 
   # Retain Docker's procfs and non-cgroup sysfs write restrictions.
   deny @{PROC}/* w,

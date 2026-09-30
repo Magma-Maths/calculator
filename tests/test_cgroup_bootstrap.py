@@ -52,6 +52,7 @@ class FakeCgroupFiles(CgroupFiles):
                 f"29 23 0:26 / {root} rw,nosuid - cgroup2 cgroup rw"
             ),
             Path("/proc/self/cgroup"): "0::/",
+            Path("/proc/self/attr/current"): "magma-calculator (enforce)",
         }
 
     def read(self, path: Path) -> str:
@@ -299,3 +300,16 @@ def test_bootstrap_uses_bounded_bind_remount(tmp_path, monkeypatch, capsys, outc
         assert calls == []
         assert fs.writes == []
         assert "cgroup remount" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile", ["unconfined", "magma-calculator (complain)", "docker-default (enforce)"])
+def test_bootstrap_requires_enforced_profile_even_on_writable_cgroup(tmp_path, capsys, profile):
+    fs = FakeCgroupFiles(tmp_path)
+    fs.files[Path("/proc/self/attr/current")] = profile
+
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    assert status == 1
+    assert calls == []
+    assert fs.writes == []
+    assert "requires the enforced magma-calculator AppArmor profile" in capsys.readouterr().err
