@@ -1,7 +1,11 @@
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from tests.containment import conftest as containment
 
@@ -123,7 +127,8 @@ def test_abstract_observer_accepts_resolved_fixture_argv(tmp_path, monkeypatch):
     assert controller.fixture_executable == "/opt/magma/versions/probe/magma.exe"
 
 
-def test_runtime_preflight_uses_supported_nsjail_help(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile", ["magma-calculator (enforce)", "magma-calculator (complain)", "unconfined"])
+def test_runtime_preflight_requires_enforced_profile_and_nsjail_help(tmp_path, monkeypatch, profile):
     root = tmp_path / "service"
     api = root / "api"
     api.mkdir(parents=True)
@@ -143,6 +148,7 @@ def test_runtime_preflight_uses_supported_nsjail_help(tmp_path, monkeypatch):
         path.write_text(value)
 
     inspection = {
+        "AppArmorProfile": "magma-calculator",
         "HostConfig": {
             "Privileged": False,
             "CapAdd": ["SYS_ADMIN"],
@@ -176,6 +182,8 @@ def test_runtime_preflight_uses_supported_nsjail_help(tmp_path, monkeypatch):
     original_read_text = containment._read_text
 
     def fake_read_text(path):
+        if path == Path("/proc/123/attr/current"):
+            return profile
         if path == Path("/proc/123/status"):
             return "CapEff:\t0000000000200000"
         return original_read_text(path)
@@ -189,6 +197,12 @@ def test_runtime_preflight_uses_supported_nsjail_help(tmp_path, monkeypatch):
 
     monkeypatch.setattr(containment, "_read_text", fake_read_text)
     monkeypatch.setattr(containment.os, "readlink", fake_readlink)
+
+    if profile != "magma-calculator (enforce)":
+        with pytest.raises(containment.ContainmentBlocked, match="AppArmor profile is not enforced"):
+            controller._check_runtime()
+        assert docker_calls == []
+        return
 
     controller._check_runtime()
 
@@ -271,6 +285,7 @@ def test_controller_starts_service_with_requested_timeout(tmp_path, monkeypatch)
     controller.docker = fake_docker
     controller._resolve_runtime = lambda: None
     controller._wait_ready = lambda: None
+    controller._observe_service_cgroup = lambda: None
     controller._check_runtime = lambda: None
     controller.answer = lambda: None
     controller.jail_observation = lambda: None
@@ -284,3 +299,43 @@ def test_controller_starts_service_with_requested_timeout(tmp_path, monkeypatch)
 
     run_call = next(call for call in docker_calls if call[:2] == ["run", "-d"])
     assert "MAGMA_TIMEOUT=10" in run_call
+    assert run_call[run_call.index("--cgroupns") + 1] == "private"
+    assert run_call[run_call.index("--security-opt") + 1] == "apparmor=magma-calculator"
+
+
+@pytest.mark.parametrize("migration_before_inspect", [False, True])
+def test_controller_observes_service_root_after_api_migration(tmp_path, monkeypatch, migration_before_inspect):
+    fixture = tmp_path / "fixture"
+    (fixture / "versions" / "probe").mkdir(parents=True)
+    (fixture / "current").symlink_to("versions/probe")
+    controller = containment.DockerController("sha256:" + "1" * 64, "2" * 64, fixture)
+    ready = False
+
+    def health(_request, *, timeout):
+        nonlocal ready
+        ready = True
+        return nullcontext(SimpleNamespace(status=200))
+
+    def process(pid):
+        group = "/calculator-test/api" if ready or migration_before_inspect else "/calculator-test"
+        return containment.ProcessIdentity(pid, 99, 1, (pid, 1), group, "python")
+
+    controller.docker = lambda args, **_kw: subprocess.CompletedProcess(args, 0, "", "")
+    controller.inspect = lambda *_args, **_kw: [{
+        "State": {"Pid": 123, "Running": True},
+        "NetworkSettings": {"Ports": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}},
+    }]
+    controller._check_runtime = lambda: None
+    controller.answer = lambda: None
+    controller.jail_observation = lambda: None
+    monkeypatch.setattr(containment.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(containment.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(containment.urllib.request, "urlopen", health)
+    monkeypatch.setattr(containment, "read_process", process)
+
+    try:
+        with controller:
+            assert controller.init_identity.cgroup == "/calculator-test/api"
+            assert controller.service_cgroup == Path("/sys/fs/cgroup/calculator-test")
+    finally:
+        controller.cleanup()

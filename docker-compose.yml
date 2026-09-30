@@ -4,6 +4,9 @@ services:
     container_name: magma-calculator
     cap_add:
       - SYS_ADMIN
+    cgroup: private
+    security_opt:
+      - apparmor=magma-calculator
     mem_limit: 3g
     pids_limit: 320
     tmpfs:

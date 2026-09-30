@@ -27,6 +27,7 @@ EXPECTED_PIDS_MAX = 64
 EXPECTED_CPU_MAX = "1000000 1000000"
 OUTER_MEMORY_MAX = 3 * 1024**3
 OUTER_PIDS_MAX = 320
+APPARMOR_PROFILE = "magma-calculator"
 
 
 class ContainmentBlocked(RuntimeError):
@@ -618,6 +619,10 @@ class DockerController:
                 self.network,
                 "--cap-add",
                 "SYS_ADMIN",
+                "--cgroupns",
+                "private",
+                "--security-opt",
+                f"apparmor={APPARMOR_PROFILE}",
                 "--memory",
                 "3g",
                 "--pids-limit",
@@ -656,6 +661,7 @@ class DockerController:
             raise ContainmentBlocked(f"service container did not start: {started.stderr}")
         self._resolve_runtime()
         self._wait_ready()
+        self._observe_service_cgroup()
         self._check_runtime()
         self.answer()
         self.jail_observation()
@@ -710,15 +716,20 @@ class DockerController:
         if binding.get("HostIp") != "127.0.0.1":
             raise ContainmentBlocked("API port is not restricted to host loopback")
         self.base_url = f"http://127.0.0.1:{binding['HostPort']}"
+
+    def _observe_service_cgroup(self) -> None:
         try:
             identity = read_process(self.init_pid)
         except (FileNotFoundError, PermissionError, ValueError) as exc:
             raise ContainmentBlocked(f"service init process is not externally visible: {exc}") from exc
         self.init_identity = identity
         relative = identity.cgroup.lstrip("/")
-        root = (CGROUP_ROOT / relative).resolve()
+        api = (CGROUP_ROOT / relative).resolve()
+        if api.name != "api":
+            raise ContainmentBlocked("ready API process is outside the delegated api cgroup")
+        root = api.parent
         cgroup_root = CGROUP_ROOT.resolve()
-        if root != cgroup_root and cgroup_root not in root.parents:
+        if root == cgroup_root or cgroup_root not in root.parents:
             raise ContainmentBlocked(f"service cgroup escaped the unified hierarchy: {root}")
         self.service_cgroup = root
 
@@ -753,8 +764,13 @@ class DockerController:
             raise ContainmentBlocked(f"service capability additions differ from production: {cap_add}")
         if host.get("Memory") != OUTER_MEMORY_MAX or host.get("PidsLimit") != OUTER_PIDS_MAX:
             raise ContainmentBlocked("service outer memory or PID limit differs from production")
-        if host.get("CgroupnsMode") not in ("", "private"):
+        if host.get("CgroupnsMode") != "private":
             raise ContainmentBlocked("service does not use a private cgroup namespace")
+        if inspection.get("AppArmorProfile") != APPARMOR_PROFILE:
+            raise ContainmentBlocked("service does not select the calculator AppArmor profile")
+        apparmor = _read_text(Path(f"/proc/{self.init_pid}/attr/current")).strip()
+        if apparmor != f"{APPARMOR_PROFILE} (enforce)":
+            raise ContainmentBlocked(f"service AppArmor profile is not enforced: {apparmor}")
         fixture_mounts = [
             mount
             for mount in inspection.get("Mounts", [])
@@ -838,6 +854,7 @@ class DockerController:
                     "init_pid": self.init_pid,
                     "service_cgroup": str(self.service_cgroup),
                     "cap_eff": f"{effective:016x}",
+                    "apparmor": apparmor,
                     "nsjail_help_banner": help_text.splitlines()[0],
                 },
                 sort_keys=True,

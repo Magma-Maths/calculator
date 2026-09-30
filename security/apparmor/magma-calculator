@@ -1,0 +1,55 @@
+abi <abi/4.0>,
+#include <tunables/global>
+
+@{NSJAIL_ROOT}=/run/user/0/nsjail/root
+
+profile magma-calculator flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  file,
+  network,
+  capability,
+  userns,
+
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (send,receive) peer=magma-calculator,
+  ptrace (read,trace,readby,tracedby) peer=magma-calculator,
+  ptrace (readby,tracedby) peer=unconfined,
+
+  # Bootstrap remounts only its existing private cgroup mount.
+  mount options=(remount,bind,rw,nosuid,nodev,noexec) -> /sys/fs/cgroup/,
+  mount options=(remount,bind,rw,nosuid,nodev,noexec,relatime) -> /sys/fs/cgroup/,
+
+  # The pinned nsjail builds its mount tree here before pivot_root.
+  mount options=(rw,rprivate) -> /,
+  mount fstype=tmpfs -> /run/user/0/nsjail/{root,tmp}/,
+  mount fstype=tmpfs -> @{NSJAIL_ROOT}/tmp/,
+  mount options in (rw,ro,bind,rbind,private,rprivate,nosuid,nodev)
+    /{opt/magma,usr/lib,usr/lib64,lib,lib64}/ -> @{NSJAIL_ROOT}/{opt/magma,usr/lib,lib,lib64}/,
+  mount options in (rw,ro,bind,rbind,private,rprivate,nosuid,nodev)
+    /etc/ld.so.cache -> @{NSJAIL_ROOT}/etc/ld.so.cache,
+  mount options=(ro,remount,bind) -> @{NSJAIL_ROOT}/,
+  pivot_root oldroot=@{NSJAIL_ROOT}/ @{NSJAIL_ROOT}/,
+  umount /run/user/0/nsjail/tmp/,
+  umount /,
+
+  # nsjail applies final flags after pivot_root, using paths inside the jail.
+  mount options in (ro,remount,bind,nosuid,nodev,relatime)
+    -> /{opt/magma,usr/lib,usr/lib64,lib,lib64}/,
+  mount options in (ro,remount,bind,nosuid,nodev,relatime) -> /etc/ld.so.cache,
+  mount options in (rw,remount,bind,nosuid,nodev,noexec,relatime) -> /tmp/,
+
+  # Retain Docker's procfs and non-cgroup sysfs write restrictions.
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/{sysrq-trigger,kcore} rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/{firmware,kernel/security,devices/virtual/powercap}/** rwklx,
+}

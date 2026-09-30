@@ -101,6 +101,8 @@ By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). T
 ### Prerequisites
 
 - **Docker** with support for `--cap-add SYS_ADMIN` (required for nsjail namespace creation)
+- **AppArmor 4.0 or later**, enabled on the Linux host, with the calculator profile loaded
+- **cgroup v2** with `memory`, `pids`, `cpu`, and `memory.swap.max` support
 - **Magma** installed on the host (default: `/opt/magma`)
 
 ### 1. Get the image
@@ -159,6 +161,17 @@ This creates the `traefik` Docker network, binds ports 80/443, and handles Let's
 
 ### 3b. Run with docker-compose (production)
 
+Load the profile from the same source revision as the candidate on the Docker host:
+
+```bash
+sudo apt-get install -y apparmor
+sudo install -m 0644 security/apparmor/magma-calculator /etc/apparmor.d/magma-calculator
+sudo bash scripts/load-apparmor.sh
+```
+
+The installed copy lets the host's AppArmor service reload it after reboot.
+Validate the candidate's containment checks on a nonproduction host before rollout.
+
 ```bash
 cp .env.example .env   # set DOMAIN and CALCULATOR_VERSION
 docker compose up -d
@@ -176,11 +189,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 ### 3c. Run without docker-compose (testing)
 
-Direct Docker use needs a prepared fixture host. It must provide a writable cgroup v2 root scoped to the container, with `memory`, `pids`, and `cpu` delegated and usable `memory.swap.max` accounting. The flags below set only the outer caps. No supported raw-Docker wiring establishes this prerequisite.
+Load the AppArmor profile as above. The bootstrap checks the private cgroup namespace
+and outer limits before remounting its existing cgroup mount writable. It then moves
+the API into a child cgroup and verifies controller writes. A failure stops startup.
+Successful startup alone does not prove request containment; the real-image suite
+must also pass on the selected host.
 
 ```bash
 docker run --rm \
   --cap-add SYS_ADMIN \
+  --cgroupns private --security-opt apparmor=magma-calculator \
   --memory 3g \
   --pids-limit 320 \
   --tmpfs /tmp:size=128m \
@@ -198,6 +216,7 @@ Start a second container with long-running request settings:
 ```bash
 docker run --rm \
   --cap-add SYS_ADMIN \
+  --cgroupns private --security-opt apparmor=magma-calculator \
   --memory 3g \
   --pids-limit 320 \
   --tmpfs /tmp:size=128m \
@@ -236,7 +255,11 @@ poetry run bash scripts/test-safe.sh  # fake-only tests shared with CI
 
 The safe command does not collect the real-image containment suite or real-Magma tests.
 Real-image containment runs through `.github/workflows/containment.yml` after it prepares
-a verified candidate, static fixture, Docker access, and scoped cgroup delegation. Real-Magma
+a verified candidate and static fixture and loads the calculator AppArmor profile.
+It checks Docker access, scoped cgroup delegation, and the enforced profile before
+exercising request containment. Missing prerequisites fail the job as BLOCKED.
+Both the canary and containment jobs print kernel AppArmor denials on failure.
+Real-Magma
 tests require a reviewed Magma installation and execute Magma without nsjail:
 
 ```bash

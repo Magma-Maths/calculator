@@ -1,6 +1,6 @@
 # Deploy on Ubuntu
 
-Step-by-step guide for deploying the Magma Calculator on a fresh Ubuntu server (22.04 or 24.04).
+Step-by-step guide for deploying the Magma Calculator on Ubuntu 24.04 or later with AppArmor 4.0 and cgroup v2.
 
 The calculator runs from a prebuilt image, `ghcr.io/magma-maths/calculator`, that GitHub Actions publishes on every push to `main`. The server only pulls it: nothing is compiled there, and the image contains no Magma. Your licensed copy stays on the host and is bind-mounted into the container.
 
@@ -79,6 +79,18 @@ The clone provides the compose files, the env templates and the Traefik stack; t
 git clone https://github.com/Magma-Maths/calculator.git
 cd calculator
 ```
+
+Load the calculator profile from the same revision as the candidate image:
+
+```bash
+sudo apt-get install -y apparmor
+sudo install -m 0644 security/apparmor/magma-calculator /etc/apparmor.d/magma-calculator
+sudo bash scripts/load-apparmor.sh
+```
+
+The installed profile is reloaded by AppArmor after reboot. Compose selects it
+explicitly; startup fails if it is unavailable. Validate containment on a
+nonproduction host before deploying a candidate to production.
 
 ## 5. Start Traefik
 
