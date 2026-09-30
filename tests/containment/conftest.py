@@ -34,6 +34,16 @@ class ContainmentBlocked(RuntimeError):
     pass
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.failed and call.excinfo is not None and isinstance(
+        call.excinfo.value, ContainmentBlocked
+    ):
+        report.longrepr = f"BLOCKED: {call.excinfo.value}\n{report.longrepr}"
+
+
 class CommandFailed(ContainmentBlocked):
     def __init__(self, args: list[str], returncode: int, stdout: str, stderr: str):
         self.args_list = args

@@ -214,11 +214,6 @@ def test_persistent_paths_are_read_only_and_tmp_is_noexec(controller: DockerCont
             for root in ("/", "/app", "/data", "/home/calculator")
         )
     ]
-    if untested:
-        block_missing_evidence(
-            ContainmentBlocked(f"untested writable persistent mounts: {sorted(untested)}")
-        )
-
     path_classes = ("root", "app", "data", "magma", "home", "usrlib", "lib")
     accepted_denials = {errno.EACCES, errno.EROFS, errno.ENOENT}
     for path_class in path_classes:
@@ -234,6 +229,10 @@ def test_persistent_paths_are_read_only_and_tmp_is_noexec(controller: DockerCont
     assert record.status == "DENIED", execution.body
     assert record.fields["operation"] == "copy_exec"
     assert record.integer("errno") == errno.EACCES
+    if untested:
+        block_missing_evidence(
+            ContainmentBlocked(f"untested writable persistent mounts: {sorted(untested)}")
+        )
     evidence(
         "filesystem",
         path_classes=list(path_classes),

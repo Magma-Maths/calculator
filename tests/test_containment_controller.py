@@ -19,6 +19,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 root = Path(CONTAINMENT_ROOT)
 conftest_spec = importlib.util.spec_from_file_location("conftest", root / "conftest.py")
 conftest = importlib.util.module_from_spec(conftest_spec)
@@ -30,6 +32,9 @@ acceptance_spec.loader.exec_module(acceptance)
 
 
 class Controller:
+    def __init__(self, escape_mode=None):
+        self.escape_mode = escape_mode
+
     def jail_observation(self):
         mount = conftest.MountObservation
         return {
@@ -40,8 +45,16 @@ class Controller:
             "/unchecked": mount("/unchecked", frozenset({"rw"}), "ext4", "/dev/vda"),
         }, {}
 
-    def execute(self, *_args):
-        raise AssertionError("the missing-evidence path must stop before a probe request")
+    def execute(self, mode, argument):
+        status = "OK" if mode == self.escape_mode else "DENIED"
+        if mode == "path_write":
+            target = argument.split(":", 1)[0]
+            line = f"PROBE path_write {status} target={target} operation=create errno=13"
+        else:
+            line = f"PROBE tmp_exec {status} operation=copy_exec errno=13"
+        return conftest.ApiResponse(
+            200, {"success": True, "exit_code": 0, "stdout": line + "\\n"}, 0.0
+        )
 
 
 def test_missing_evidence():
@@ -56,6 +69,14 @@ def test_assertion_failure():
             return mounts, namespaces
 
     acceptance.test_persistent_paths_are_read_only_and_tmp_is_noexec(IncompleteController())
+
+
+@pytest.mark.parametrize("mode", ["path_write", "tmp_exec"])
+def test_escape_precedes_missing_mount_coverage(mode):
+    with pytest.raises(AssertionError, match="OK"):
+        acceptance.test_persistent_paths_are_read_only_and_tmp_is_noexec(
+            Controller(escape_mode=mode)
+        )
 """.replace("CONTAINMENT_ROOT", repr(str(containment_root))).lstrip(),
         encoding="utf-8",
     )
@@ -70,6 +91,74 @@ def test_assertion_failure():
     assert result.returncode == 1
     assert "BLOCKED: untested writable persistent mounts" in result.stdout + result.stderr
     assert "AssertionError" in result.stdout + result.stderr
+    assert "2 passed" in result.stdout + result.stderr
+    assert "2 failed" in result.stdout + result.stderr
+
+
+def test_raw_containment_blocks_keep_failed_reports_with_labels(tmp_path):
+    script = tmp_path / "test_raw_blocks.py"
+    script.write_text(
+        """
+import pytest
+
+from tests.containment.conftest import ContainmentBlocked
+
+
+@pytest.fixture
+def blocked_setup():
+    raise ContainmentBlocked("setup evidence unavailable")
+
+
+@pytest.fixture
+def blocked_teardown():
+    yield
+    raise ContainmentBlocked("teardown evidence unavailable")
+
+
+def test_setup(blocked_setup):
+    pass
+
+
+def test_body():
+    raise ContainmentBlocked("body evidence unavailable")
+
+
+def test_teardown(blocked_teardown):
+    pass
+
+
+def test_assertion():
+    assert False, "ordinary assertion"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "conftest.py").write_text(
+        """
+def pytest_runtest_logreport(report):
+    if report.failed:
+        blocked = report.longreprtext.startswith("BLOCKED: ")
+        print(f"REPORT {report.nodeid.split('::')[-1]} {report.when} failed {blocked}")
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-s", "-p", "tests.containment.conftest", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    for test_name, phase in (
+        ("test_setup", "setup"),
+        ("test_body", "call"),
+        ("test_teardown", "teardown"),
+    ):
+        assert f"REPORT {test_name} {phase} failed True" in output
+    assert "REPORT test_assertion call failed False" in output
+    assert "AssertionError: ordinary assertion" in output
 
 
 def controller_without_init(**attributes):
