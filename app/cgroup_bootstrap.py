@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -12,6 +13,7 @@ ROOT = Path("/sys/fs/cgroup")
 REQUIRED_CONTROLLERS = {"memory", "pids", "cpu"}
 OUTER_MEMORY_BYTES = 3 * 1024**3
 OUTER_PIDS = 320
+APPARMOR_PROFILE = "magma-calculator"
 
 
 class CgroupFiles:
@@ -33,13 +35,30 @@ class CgroupFiles:
     def rmdir(self, path: Path) -> None:
         path.rmdir()
 
+    def remount_cgroup(self, path: Path) -> None:
+        # A bind remount changes this mount's flags, not the shared superblock.
+        try:
+            result = subprocess.run(
+                [
+                    "/bin/mount", "--no-mtab", "-o",
+                    "remount,bind,rw,nosuid,nodev,noexec", "--", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("cgroup remount timed out") from exc
+        _require(result.returncode == 0, f"cgroup remount failed: {result.stderr.strip()}")
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
 
 
-def _check_mount(mountinfo: str, cgroup_path: str, root: Path) -> None:
+def _check_mount(mountinfo: str, cgroup_path: str, root: Path) -> bool:
     _require(cgroup_path.strip() == "0::/", "process is outside the cgroup namespace root")
     for line in mountinfo.splitlines():
         left, separator, right = line.partition(" - ")
@@ -51,8 +70,9 @@ def _check_mount(mountinfo: str, cgroup_path: str, root: Path) -> None:
             continue
         _require(fields[3] == "/", "cgroup mount does not expose the namespace root")
         _require(fs_fields[0] == "cgroup2", "cgroup mount is not cgroup2")
-        _require("rw" in fields[5].split(","), "cgroup2 mount is read-only")
-        return
+        options = set(fields[5].split(","))
+        _require(bool(options & {"ro", "rw"}), "cgroup2 mount has no access mode")
+        return "rw" in options
     raise RuntimeError("cgroup2 mount is missing")
 
 
@@ -70,12 +90,16 @@ def _check_budget(settings: Settings) -> None:
     )
 
 
-def _check_controls(root: Path, fs: CgroupFiles, pid: int) -> None:
+def _check_outer_limits(root: Path, fs: CgroupFiles) -> None:
     _require(
         fs.read(root / "memory.max") == str(OUTER_MEMORY_BYTES),
         "outer memory.max is not 3 GiB",
     )
     _require(fs.read(root / "pids.max") == str(OUTER_PIDS), "outer pids.max is not 320")
+
+
+def _check_controls(root: Path, fs: CgroupFiles, pid: int) -> None:
+    _check_outer_limits(root, fs)
     available = set(fs.read(root / "cgroup.controllers").split())
     _require(REQUIRED_CONTROLLERS <= available, "memory, pids, or cpu controller is missing")
 
@@ -128,7 +152,18 @@ def main(
         return 1
     try:
         _check_budget(configured)
-        _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root)
+        writable = _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root)
+        if not writable:
+            _check_outer_limits(root, fs)
+            _require(
+                fs.read(Path("/proc/self/attr/current")) == f"{APPARMOR_PROFILE} (enforce)",
+                "cgroup remount requires the enforced magma-calculator AppArmor profile",
+            )
+            fs.remount_cgroup(root)
+            _require(
+                _check_mount(fs.read(mountinfo_path), fs.read(cgroup_path), root),
+                "cgroup2 mount is still read-only after remount",
+            )
         _check_controls(root, fs, os.getpid())
     except (OSError, RuntimeError) as exc:
         print(f"cgroup bootstrap: {exc}", file=sys.stderr)

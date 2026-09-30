@@ -1,8 +1,9 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
-from app.cgroup_bootstrap import main
+from app.cgroup_bootstrap import CgroupFiles, main
 from app.config import Settings
 
 
@@ -27,7 +28,7 @@ def test_resource_configuration_contract():
     assert "MAGMA_CPU_MS_PER_SEC=1000" in env
 
 
-class FakeCgroupFiles:
+class FakeCgroupFiles(CgroupFiles):
     def __init__(
         self,
         root: Path,
@@ -188,3 +189,113 @@ def test_bootstrap_execs_after_probe(tmp_path):
         for path, value in fs.writes
     )
     assert_no_bootstrap_probe(fs)
+
+
+def read_only_cgroup(root):
+    fs = FakeCgroupFiles(root)
+    fs.files[Path("/proc/self/mountinfo")] = (
+        f"29 23 0:26 / {root} ro,nosuid,nodev,noexec - cgroup2 cgroup rw"
+    )
+    fs.files[Path("/proc/self/attr/current")] = "magma-calculator (enforce)"
+    return fs
+
+
+def test_bootstrap_remounts_scoped_cgroup_before_migrating_api(tmp_path):
+    fs = read_only_cgroup(tmp_path)
+    remounted = []
+
+    def remount(root):
+        assert fs.writes == []
+        remounted.append(root)
+        mountinfo = Path("/proc/self/mountinfo")
+        fs.files[mountinfo] = fs.files[mountinfo].replace(" ro,", " rw,")
+
+    fs.remount_cgroup = remount
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    assert status == 0
+    assert len(calls) == 1
+    assert remounted == [tmp_path]
+    assert any(path.name == "cgroup.subtree_control" for path, _ in fs.writes)
+
+
+@pytest.mark.parametrize("change", ["namespace", "mount_root", "fstype", "memory", "pids", "profile"])
+def test_bootstrap_rejects_unsafe_remount_before_any_mutation(tmp_path, change):
+    fs = read_only_cgroup(tmp_path)
+    if change == "namespace":
+        fs.files[Path("/proc/self/cgroup")] = "0::/host/service"
+    elif change == "mount_root":
+        key = Path("/proc/self/mountinfo")
+        fs.files[key] = fs.files[key].replace("0:26 / ", "0:26 /host ")
+    elif change == "fstype":
+        key = Path("/proc/self/mountinfo")
+        fs.files[key] = fs.files[key].replace(" - cgroup2 ", " - tmpfs ")
+    elif change == "memory":
+        fs.files[tmp_path / "memory.max"] = "max"
+    elif change == "pids":
+        fs.files[tmp_path / "pids.max"] = "max"
+    else:
+        fs.files[Path("/proc/self/attr/current")] = "unconfined"
+
+    def forbidden_remount(_root):
+        pytest.fail("unsafe mount was remounted")
+
+    fs.remount_cgroup = forbidden_remount
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    assert status == 1
+    assert calls == []
+    assert fs.writes == []
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_bootstrap_stops_when_remount_cannot_make_cgroup_writable(tmp_path, capsys, denied):
+    fs = read_only_cgroup(tmp_path)
+    attempts = []
+
+    def remount(root):
+        attempts.append(root)
+        if denied:
+            raise PermissionError("remount denied")
+
+    fs.remount_cgroup = remount
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    assert attempts == [tmp_path]
+    assert status == 1
+    assert calls == []
+    assert fs.writes == []
+    diagnostic = capsys.readouterr().err
+    assert ("remount denied" if denied else "still read-only after remount") in diagnostic
+
+
+@pytest.mark.parametrize("outcome", ["ok", "denied", "timeout"])
+def test_bootstrap_uses_bounded_bind_remount(tmp_path, monkeypatch, capsys, outcome):
+    fs = read_only_cgroup(tmp_path)
+
+    def mount(command, **kwargs):
+        assert command == [
+            "/bin/mount", "--no-mtab", "-o",
+            "remount,bind,rw,nosuid,nodev,noexec", "--", str(tmp_path),
+        ]
+        assert kwargs["timeout"] == 5
+        assert fs.writes == []
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(command, 5)
+        if outcome == "denied":
+            return subprocess.CompletedProcess(command, 32, "", "permission denied")
+        key = Path("/proc/self/mountinfo")
+        fs.files[key] = fs.files[key].replace(" ro,", " rw,")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", mount)
+    status, calls = run_fake_bootstrap(tmp_path, fs)
+
+    if outcome == "ok":
+        assert status == 0
+        assert len(calls) == 1
+    else:
+        assert status == 1
+        assert calls == []
+        assert fs.writes == []
+        assert "cgroup remount" in capsys.readouterr().err

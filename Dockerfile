@@ -25,7 +25,7 @@ WORKDIR /app
 
 # Install nsjail runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnl-3-200 libnl-route-3-200 libprotobuf32 && \
+    libnl-3-200 libnl-route-3-200 libprotobuf32 mount && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for Magma (nsjail drops privileges to this user)
