@@ -1,0 +1,295 @@
+# Firecracker worker
+
+Operator notes for the Firecracker worker, which runs each `/execute` job in
+its own freshly booted microVM. Code lives under `firecracker/`; the API
+reaches it through `SUPERVISOR_SOCKET`.
+
+## 1. What runs where
+
+```
++-----------------+   UNIX socket    +------------------------+
+|  API container  |----------------->|  magma-fc-supervisor    |
+|  (unprivileged) | supervisor.sock  |  (root, one process)    |
++-----------------+                  +-----------+------------+
+                                                  | systemctl start magma-fc@<slot>
+                                                  v
+                                      +------------------------+
+                                      |  magma-fc@<slot>.service|
+                                      |  runs magma-fc-launch   |
+                                      +-----------+------------+
+                                                  | exec jailer
+                                                  v
+                                      +------------------------+
+                                      |  jailer -> firecracker  |
+                                      |  (chroot jail root)     |
+                                      +-----------+------------+
+                                                  | vsock CONNECT 52
+                                                  v
+                                      +------------------------+
+                                      |  guest microVM           |
+                                      |  init.sh -> agent.py     |
+                                      +------------------------+
+```
+
+The API container never sees Magma or any virtualization authority; it only ever talks to the supervisor socket. The supervisor owns a
+fixed pool of named slots, one systemd unit per slot. Each unit execs the
+jailer, which chroots and execs Firecracker. Inside the guest, init mounts the
+Magma image, runs the optional site hook, and starts the agent. The agent
+handles exactly one job and powers the guest off.
+
+Each free slot keeps its next guest booted, with the host already connected
+to the agent on vsock, so a job skips the boot. The job's code and
+environment reach the guest only at hand-off. After the job the slot is
+released as before and a replacement boots in the background. A job that
+finds no ready slot waits for a booting one and fails if that boot fails
+or its guest is unusable by the time the job resumes.
+If the idle guest has died or aged out by hand-off, the supervisor releases
+it and runs the job once on a fresh boot. Either way a job waits at most one
+release (`TimeoutStopSec` plus the 8 s drain) and one `boot_timeout` before
+its code reaches a guest. With the deployed values (5 + 8 + 20 s, plus a
+125 s exchange at `max_timeout` 120) that stays inside the API's
+`magma_timeout + 60` read deadline. A failed background boot is not
+retried; the next job on that slot waits for its release, then boots on
+demand. Idle guests hold their memory. Stopping the supervisor waits for
+any staging or cleanup still running, then tears the idle guests down.
+
+The API container runs as the image's unprivileged `calculator` user.
+
+## 2. Host layout
+
+- `/opt/magma-fc/v1.17.0/{firecracker,jailer}` - the pinned Firecracker release binaries
+- `/opt/magma-fc/src` - calculator checkout; `PYTHONPATH` for the supervisor and `fcrun`
+- `/opt/magma-fc/bin/magma-fc-launch` - exec'd by the per-slot unit
+- `/srv/magma-fc/images/{vmlinux,rootfs.ext4,magma-<version>.ext4}` - built images, read-only, root:firecracker
+- `/srv/magma-fc/jails/firecracker/<slot>/root` - per-job jail directory staged and torn down by the supervisor
+- `/etc/magma-fc/{supervisor.json,worker.env}` - supervisor config and the unit's environment file
+- `/run/magma-fc/supervisor.sock` - the API-facing socket, mode 0660, root:magma-api
+
+## 3. The protocols
+
+**API to supervisor** (over `/run/magma-fc/supervisor.sock`, one connection per job):
+request `{"code": str, "timeout": int, "cpu_timeout": int, "output_bytes": int}`;
+reply `{"stdout", "stderr", "exit_code", "timed_out", "truncated"}`, or on
+failure `{"error": "busy"|"worker_failed"|"bad_request", "stdout": "", "stderr": str, "exit_code": -1, "timed_out": bool, "truncated": false}`.
+`busy` means no free slot, `bad_request` means the request failed validation
+(limits, size), `worker_failed` covers everything else (boot timeout, guest
+crash, bad reply).
+
+**Supervisor to guest** (over vsock, one connection per job): request adds
+`env` (the full Magma environment) and `magma_exe` to the four fields above;
+reply is the same five-field object, produced directly by the agent.
+
+**vsock CONNECT handshake**: Firecracker exposes the guest's `AF_VSOCK`
+listeners through one UNIX socket (`run/vsock.sock` inside the jail). The
+host connects to it, writes `CONNECT <port>\n`, and waits for `OK <n>\n`. The
+host also checks `SO_PEERCRED` on that UNIX socket and refuses a reply whose
+uid is not the uid the jail was staged for, so a Firecracker process that
+somehow got repointed at a different socket cannot be mistaken for the guest.
+
+**Frame format**: every message, both directions, is a 4-byte big-endian
+length prefix followed by that many bytes of UTF-8 JSON (no newline). The
+length is checked against a max before any body bytes are read. `AGENT_PORT
+= 52`, `MAX_REQUEST_BYTES = 256 KiB` (host to guest), `MAX_REPLY_BYTES = 1 MiB`
+(guest to host). The same two constants also bound the API-facing socket: a
+request read off `supervisor.sock` is capped at `MAX_REQUEST_BYTES` and its
+reply at `MAX_REPLY_BYTES`, independent of the host-to-guest hop.
+
+## 4. Building images by hand
+
+```bash
+firecracker/build/build-kernel.sh /srv/magma-fc/images/vmlinux
+firecracker/build/build-rootfs.sh /opt/magma-fc/src /srv/magma-fc/images/rootfs.ext4
+firecracker/build/build-magma-image.sh /opt/magma/2.29-4 /srv/magma-fc/images/magma-2.29-4.ext4
+```
+
+`build-kernel.sh` fetches Firecracker's CI kernel config and builds `vmlinux`;
+it needs a kernel build toolchain. An optional third argument names an extra
+kernel config fragment, merged before the build. The build fails if a
+requested setting is absent from the resolved config.
+`build-rootfs.sh` builds a Debian bookworm minbase tree with the agent baked
+in; it needs root, `mmdebstrap`, and `e2fsprogs`. An optional third argument
+names a site hook to install as executable `/etc/magma-fc/site-init`.
+Init runs that hook as root, without arguments, after mounting the guest
+filesystems and before starting the agent. A failed hook stops the boot.
+`build-magma-image.sh` packs a Magma version tree containing `magma.exe`
+into a read-only ext4 image for `/dev/vdb`; it needs `e2fsprogs`.
+
+In `supervisor.json`, each slot has a `name` and optional `boot_args` string
+appended to its kernel command line. The string accepts up to 1024 ASCII
+characters as unquoted `key=value` tokens separated by single spaces.
+Keys use letters, digits, `_`, `.`, or `-`; values also accept `/,:+@%=`.
+The setting defaults to empty.
+
+None of the three scripts set the final ownership the images need in
+`/srv/magma-fc/images` (`root:firecracker`, see section 2); an image built
+by hand needs `chgrp firecracker` on top of the `chmod 0640` the scripts
+already do, or the jailer cannot read it. `fc-debug-boot.sh` (section 5)
+needs root, since it execs Firecracker directly against `/dev/kvm`.
+
+## 5. First boot by hand
+
+```bash
+firecracker/host/fc-debug-boot.sh \
+  /srv/magma-fc/images/vmlinux /srv/magma-fc/images/rootfs.ext4 \
+  /srv/magma-fc/images/magma-2.29-4.ext4 'site.slot=one'
+```
+
+The fourth argument is the same optional boot-argument string used by the
+supervisor. This boots with a serial console, no jailer, and no vsock device;
+use it to inspect early boot. Run jobs through the supervisor (section 6).
+
+To get a shell instead, set `BOOT_ARGS=init=/bin/bash`:
+
+```bash
+BOOT_ARGS=init=/bin/bash firecracker/host/fc-debug-boot.sh \
+  /srv/magma-fc/images/vmlinux /srv/magma-fc/images/rootfs.ext4 \
+  /srv/magma-fc/images/magma-2.29-4.ext4 'site.slot=one'
+```
+
+This opens a root shell before `init.sh` runs. To perform the normal guest
+setup, run `/opt/calculator-guest/init.sh`.
+
+## 6. Smoke test through the supervisor
+
+```bash
+sudo -u magma-api PYTHONPATH=/opt/magma-fc/src \
+  python3 -m firecracker.host.fcrun -e 'print 1+1;'
+```
+
+`magma-api` is both a system user and a group, created together by the
+Ansible role. The socket is 0660 root:magma-api, so run this as a user in
+that group; the role's own smoke-test task runs it as the `magma-api` user
+itself. Anyone outside the group gets a connection error, not a protocol
+one. `fcrun` defaults to `/run/magma-fc/supervisor.sock`, a 60s timeout, and
+a 20 KiB output cap; pass `--code-file` for longer snippets. It exits 2 when
+the reply carries an `error` field, 0 otherwise, and prints the full reply
+as JSON.
+
+Run this once with the default `guest_seccomp: "on"`. If the reply has
+`seccomp_killed: true`, rerun in `"log"` mode and add the syscall it names
+to the policy (section 9, Seccomp) rather than leaving the filter off.
+
+## 7. Checks after a job
+
+```bash
+systemctl status magma-fc@slot1
+ls /srv/magma-fc/jails/firecracker/
+journalctl -u magma-fc-supervisor
+journalctl -u magma-fc@slot1
+```
+
+The guest's serial console is disabled, so a compromised or noisy guest
+cannot flood the host log; `journalctl -u magma-fc@<slot>` instead carries
+Firecracker's and the jailer's own startup errors (a bad config.json, a
+missing image, a jailer chroot failure) for that slot's unit.
+
+After a clean run the unit is stopped and, once its cgroup drains, the
+slot's jail directory is removed. The slot goes back in the free pool and
+its unit starts again to boot the replacement guest. A slot that fails to drain within the stop grace
+period is quarantined: this is in-process supervisor state, not something
+systemd or the filesystem shows. The slot is withheld from new jobs until
+the supervisor restarts, its jail directory is left in place for
+inspection, and the only visible sign is a log line (`... quarantining
+...`); `journalctl -u magma-fc-supervisor` is where to look.
+
+The supervisor logs a specific message for most worker_failed outcomes: a
+unit start failure logs the `systemctl` output, a vsock connect failure, an
+OSError during the request/reply exchange (`guest connection for <slot>
+failed: ...`), a missed reply deadline (`guest did not reply before the
+deadline on <slot>`), and a bad reply frame each log their own error. An
+unexpected exception inside a job on a slot logs `job failed on <slot>`
+with a full traceback; one outside that scope (for example before a slot
+is taken) is caught in `serve()` and logs `unhandled error running job`.
+`bad_request` replies come straight from request validation and log
+nothing of their own. Every `run_job()` call, including `bad_request` and
+`busy` ones, ends with one info line naming the slot (or `-` when none was
+claimed), the outcome, and the free and quarantined slot counts. One line
+at startup reports the same two counts after the supervisor resets every
+slot it manages. A slot quarantined while idle logs `idle <slot>
+quarantined (N free, N quarantined)` with the same counts.
+
+## 8. Limits and where they are set
+
+- **Guest memory**: `mem_mib` in `/etc/magma-fc/supervisor.json`, copied into
+  each job's `config.json` as `machine-config.mem_size_mib`.
+- **Unit memory ceiling**: `MemoryMax=1536M` in `magma-fc@.service`, a
+  systemd cgroup limit on the whole jailed process tree (jailer, Firecracker,
+  the guest), independent of and larger than the guest's own RAM.
+- **Unit wall-clock ceiling**: `RuntimeMaxSec=150` in `magma-fc@.service`;
+  systemd stops the unit if a job, including guest boot, runs longer than
+  this regardless of what the agent or supervisor are doing. Idle time
+  counts too. The supervisor therefore reboots a guest that has waited
+  `RuntimeMaxSec - max_timeout - 5` seconds (at least `boot_timeout`)
+  without a job. With 150 and 120 that is every 25 s per idle slot.
+- **Per-job timeout, CPU timeout, output cap**: `timeout`, `cpu_timeout`,
+  `output_bytes` on the request, sourced from the API's `MAGMA_TIMEOUT`,
+  `MAGMA_CPU_TIMEOUT`, `MAGMA_OUTPUT_KB` settings. `max_timeout` in
+  `supervisor.json` is a hard ceiling, not a clamp: a request whose
+  `timeout` or `cpu_timeout` exceeds it is rejected outright with
+  `bad_request` ("timeout too large"), never forwarded to the guest. The
+  agent enforces `cpu_timeout` with `RLIMIT_CPU` and `timeout` with a
+  wall-clock kill; the supervisor re-truncates `stdout`/`stderr` to
+  `output_bytes`/64 KiB on the way back out, so a guest that lies about
+  truncation cannot inflate the reply.
+- **Encoded frame budget**: request and reply caps are measured on the
+  encoded JSON frame, where a control character takes six bytes, so code
+  heavy in control characters can be refused as too large below the API's
+  raw input limit; output that overflows is trimmed and marked truncated.
+- **Connection cap**: `max_connections` in `supervisor.json` (default
+  2 x slots + 2) counts every open API connection; beyond it the supervisor
+  answers `busy` and closes. A reply not read within 10 s is dropped.
+- **Timeout ceiling vs the unit's RuntimeMaxSec**: `max_timeout + boot_timeout
+  + 5` (the longest a job can legitimately take, including the deadline
+  margin in `_run_on_slot`) must stay below `RuntimeMaxSec` in
+  `magma-fc@.service`, or systemd can kill the unit out from under a job
+  that was still within its own limits. At startup `main()` logs a warning,
+  naming all three numbers, if that is not the case; it does not refuse to
+  start, since `max_timeout` is set by the infra side, not the supervisor.
+
+## 9. Security notes
+
+- The worker host runs with `--no-service-account --no-scopes`: nothing on
+  it, compromised guest or compromised host process, carries cloud
+  credentials.
+- The guest has no NIC.
+- A compromised guest can read the Magma tree image it was built with and
+  nothing else: no other host filesystem, no network, no other job's slot.
+  Jail images are hard-linked in read-only root:firecracker; only the
+  per-job slot directory is chowned to the jailed uid, so a compromised
+  guest cannot rewrite a shared master image. The guest itself is the
+  isolation boundary, and it is disposable (powered off and discarded after
+  one job); the seccomp filter below is defense in depth inside it.
+- Metadata server test: from a debug shell inside the guest, confirm the
+  instance metadata server is unreachable even without a NIC:
+  ```bash
+  python3 -c 'import socket; socket.create_connection(("169.254.169.254", 80), timeout=3)'
+  ```
+  This must fail or time out.
+
+### Accepted residual risk
+
+A job that escapes Magma and gains root inside its own guest can read the
+Magma image attached to that guest. A read-only disk protects the image's
+integrity, not its secrecy, and any process can read the binary it is
+running. The guest still gives no route to the host, to other slots or to
+the metadata server. This exposure is accepted for the public service
+(2026-10-08).
+
+### Seccomp
+
+The agent loads a seccomp allow-list on the Magma child after dropping to
+uid 1000 and before exec. The policy is in
+`firecracker/guest/seccomp_policy.py`. The supervisor config key
+`guest_seccomp` picks the mode and the host passes it to the guest as the
+kernel argument `magma.seccomp=`:
+
+- `on` (default): any syscall outside the list kills Magma with SIGSYS.
+- `log`: nothing is killed; the host adds `audit=1` and the kernel logs each
+  syscall outside the list.
+- `off`: no filter.
+
+A reply with `seccomp_killed: true` means the filter killed Magma; it
+otherwise looks like a crash (`exit_code: -1`). To find the syscall, set
+`guest_seccomp: "log"`, restart the supervisor, rerun the job and read
+`seccomp_log` in the reply. `fc-debug-boot.sh` cannot help here: it wires
+no vsock device, so the agent never receives a job to run under the filter.
