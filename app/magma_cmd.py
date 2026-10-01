@@ -1,3 +1,13 @@
+# Mirrors nsjail.cfg's constant envar lines, so the firecracker guest sees
+# the same Magma environment as the nsjail sandbox.
+MAGMA_CONSTANT_ENV: dict[str, str] = {
+    "MAGMA_LIBRARIES": "c9lattices:examples:galpols:intro:isolgps:matgps:pergps:simgps:solgps",
+    "MKL_SERIAL": "YES",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+}
+
+
 def wrap_magma_code(code: str, timeout: int) -> str:
     alarm_timeout = timeout - 1
     return (
