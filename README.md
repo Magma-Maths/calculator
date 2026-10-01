@@ -211,6 +211,8 @@ Each Magma process runs inside an nsjail sandbox with:
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
 
+An alternate backend runs each job inside its own Firecracker microVM instead of nsjail, for hosts that need per-request kernel isolation. Set `EXECUTOR_BACKEND=firecracker` and `SUPERVISOR_SOCKET` to the host's supervisor socket; see [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+
 ## Development
 
 ```bash
