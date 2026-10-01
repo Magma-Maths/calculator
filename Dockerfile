@@ -37,6 +37,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
 COPY nsjail.cfg .
+COPY security/ ./security/
 
 # Runs as root (required for nsjail namespace creation)
 # nsjail drops privileges to 'calculator' for Magma execution

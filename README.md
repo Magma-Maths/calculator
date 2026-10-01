@@ -135,6 +135,7 @@ Edit `calculator.env`. Key settings:
 | `MAGMA_MEMORY_MB` | 400 | Memory limit (MB) |
 | `MAGMA_INPUT_KB` | 50 | Max input size (KB) |
 | `MAGMA_OUTPUT_KB` | 20 | Max output size (KB) |
+| `JAIL_SECCOMP` | True | Load the seccomp policy `security/seccomp/magma.kafel` into the jail |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
@@ -210,6 +211,12 @@ Each Magma process runs inside an nsjail sandbox with:
 - **cgroup limits**: memory and CPU enforced at the kernel level
 - **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
 - **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
+- **Seccomp policy**: `security/seccomp/magma.kafel` allows only the system calls Magma was measured to use, plus a glibc baseline; any other call kills the process
+
+The executor passes the policy to nsjail while `JAIL_SECCOMP` is true, the default. A job killed by the policy returns `exit_code` -1, and its stderr starts with `killed by seccomp policy`.
+If that happens to legitimate code, rerun it with `JAIL_SECCOMP=false` to confirm the policy is the cause.
+Then find the missing call by running the same input under `strace -f` on the host, and add it to the policy.
+Turn the switch back on afterwards: it is a diagnostic, not a setting to leave off.
 
 ## Development
 
