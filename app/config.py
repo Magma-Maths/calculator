@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     magma_input_kb: int = 50
     magma_output_kb: int = 20
 
+    # Execution backend: "nsjail" (in-container jail) or "firecracker" (supervisor socket)
+    executor_backend: str = "nsjail"
+    supervisor_socket: str = "/run/magma-fc/supervisor.sock"
+
     # Service
     max_concurrent: int = 4
     port: int = 8080
