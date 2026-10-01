@@ -58,13 +58,23 @@ def _fake_magma_tree(tmp_path: Path, record: Path) -> Path:
     return tree
 
 
-def _jailed_client(tmp_path: Path, monkeypatch, magma_root: Path):
-    """POST /execute through the real execute_magma with a fake nsjail on PATH."""
+@pytest.fixture
+def nsjail_launch(tmp_path) -> Path:
+    """Where the fake nsjail records the flags it was started with."""
+    return tmp_path / "nsjail-launch.json"
+
+
+def _install_fake_nsjail(tmp_path: Path, monkeypatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _install_script(bin_dir / "nsjail", _FAKE_NSJAIL_CMD)
-
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_NSJAIL_RECORD", str(tmp_path / "nsjail-launch.json"))
+
+
+def _jailed_client(tmp_path: Path, monkeypatch, magma_root: Path):
+    """POST /execute through the real execute_magma with a fake nsjail on PATH."""
+    _install_fake_nsjail(tmp_path, monkeypatch)
     monkeypatch.setenv("MAGMA_ROOT", str(magma_root))
     from app import main
     monkeypatch.setattr(main, "settings", Settings())
@@ -76,6 +86,32 @@ def _jailed_client(tmp_path: Path, monkeypatch, magma_root: Path):
 def jailed_magma(tmp_path, monkeypatch, magma_launch):
     """MAGMA_ROOT points straight at the fake install tree."""
     return _jailed_client(tmp_path, monkeypatch, _fake_magma_tree(tmp_path, magma_launch))
+
+
+def _jailed_client_running(tmp_path, monkeypatch, magma_launch, body: str):
+    tree = _fake_magma_tree(tmp_path, magma_launch)
+    _install_script(tree / "magma.exe", body)
+    return _jailed_client(tmp_path, monkeypatch, tree)
+
+
+@pytest.fixture
+def jailed_magma_killed_by_sigsys(tmp_path, monkeypatch, magma_launch):
+    """magma.exe dies by SIGSYS on start, as on a call the seccomp policy kills."""
+    return _jailed_client_running(tmp_path, monkeypatch, magma_launch, (
+        "import os, resource, signal\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+        "os.kill(os.getpid(), signal.SIGSYS)\n"
+    ))
+
+
+@pytest.fixture
+def jailed_magma_faking_sigsys(tmp_path, monkeypatch, magma_launch):
+    """magma.exe prints nsjail's SIGSYS log line and exits 159 normally."""
+    return _jailed_client_running(tmp_path, monkeypatch, magma_launch, (
+        "import sys\n"
+        "print('terminated with signal: SIGSYS (31)', file=sys.stderr)\n"
+        "sys.exit(159)\n"
+    ))
 
 
 @pytest.fixture

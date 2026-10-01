@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass, field
 
+from app.executor import SECCOMP_KILLED
+
 
 @dataclass
 class ParseResult:
@@ -104,6 +106,10 @@ def parse_stderr_warnings(stderr: str | None) -> list[str]:
     if "Alarm clock" in stderr or "Cputime limit exceeded" in stderr or "Killed" in stderr:
         warnings.append(
             "The computation exceeded the time limit and so was terminated prematurely."
+        )
+    if stderr.startswith(SECCOMP_KILLED):
+        warnings.append(
+            f"Magma was {SECCOMP_KILLED}: it made a system call the sandbox does not allow."
         )
     if "Magma: Fatal Error" in stderr:
         warnings.append("A fatal error occurred and Magma was forced to exit.")

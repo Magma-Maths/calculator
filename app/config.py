@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     magma_memory_mb: int = 400
     magma_input_kb: int = 50
     magma_output_kb: int = 20
+    jail_seccomp: bool = True
 
     # Service
     max_concurrent: int = 4
