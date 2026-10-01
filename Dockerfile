@@ -30,12 +30,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create non-root user for Magma (nsjail drops privileges to this user)
 RUN useradd -m calculator
+# A fresh named volume mounted here inherits this ownership, so the
+# firecracker backend's container, run as calculator, can write usage.jsonl.
+RUN mkdir -p /data && chown calculator:calculator /data
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/local/bin/nsjail
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
+COPY firecracker/ ./firecracker/
 COPY nsjail.cfg .
 
 # Runs as root (required for nsjail namespace creation)
