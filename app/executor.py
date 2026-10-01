@@ -1,8 +1,17 @@
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 
 from app.config import Settings
+from app.magma_cmd import magma_environment, wrap_magma_code  # noqa: F401 - re-exported
+from firecracker import protocol
+
+logger = logging.getLogger(__name__)
+
+
+class SupervisorBusy(Exception):
+    """Every Firecracker slot is in use; the caller should answer 503."""
 
 
 @dataclass
@@ -12,39 +21,10 @@ class ExecutionResult:
     exit_code: int
 
 
-def wrap_magma_code(code: str, timeout: int) -> str:
-    alarm_timeout = timeout - 1
-    return (
-        f"Alarm({alarm_timeout});\n"
-        f"SetIgnorePrompt(true);\n"
-        f"{code}\n"
-        f";\n"
-        f"quit;\n"
-    )
-
-
-def magma_environment(magma_root: str) -> list[str]:
-    """Root-dependent variables the magma launcher script exports for magma.exe.
-
-    The launcher (magma_root/magma) is a shell script and the jail mounts no
-    shell and no /usr/bin, so the binary is exec'd directly and gets these
-    from nsjail --env instead. The launcher's constant exports are in
-    nsjail.cfg.
-    """
-    root = magma_root.rstrip("/")
-    return [
-        f"MAGMA_CMD={root}/magma",
-        f"MAGMAPASSFILE={root}/magmapassfile",
-        f"MAGMA_SYSTEM_SPEC={root}/package/spec",
-        f"MAGMA_SYSTEM_PACKAGE_ROOT={root}/package",
-        f"MAGMA_LIBRARY_ROOT={root}/libs",
-        f"MAGMA_HELP_DIR={root}/InternalHelp",
-        f"MAGMA_HTML_DIR={root}/doc/html",
-    ]
-
-
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     wrapped = wrap_magma_code(code, settings.magma_timeout)
+    if settings.executor_backend == "firecracker":
+        return await execute_via_supervisor(wrapped, settings)
     # Resolved per request, like the launcher's readlink -f: Magma opens
     # package and library files lazily through these literal paths, so a
     # session must stay on one tree across a `current` symlink flip while
@@ -87,4 +67,39 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
         exit_code=proc.returncode or 0,
+    )
+
+
+async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionResult:
+    request = {
+        "code": wrapped,
+        "timeout": settings.magma_timeout,
+        "cpu_timeout": settings.magma_cpu_timeout,
+        "output_bytes": settings.magma_output_bytes,
+    }
+    try:
+        reader, writer = await asyncio.open_unix_connection(settings.supervisor_socket)
+    except OSError:
+        return ExecutionResult(stdout="", stderr="worker service unavailable", exit_code=-1)
+    try:
+        await protocol.write_frame(writer, request)
+        reply = await asyncio.wait_for(
+            protocol.read_frame(reader, protocol.MAX_REPLY_BYTES),
+            timeout=settings.magma_timeout + 60,
+        )
+    except (asyncio.TimeoutError, protocol.FrameError, OSError) as exc:
+        return ExecutionResult(stdout="", stderr=f"worker service error: {exc}", exit_code=-1)
+    finally:
+        writer.close()
+    if reply.get("error") == "busy":
+        raise SupervisorBusy()
+    if reply.get("seccomp_killed") is True:
+        log_lines = reply.get("seccomp_log") or [""]
+        logger.warning(
+            "guest seccomp filter killed magma (mode=%s): %s", reply.get("seccomp_mode"), log_lines[0]
+        )
+    return ExecutionResult(
+        stdout=str(reply.get("stdout", "")),
+        stderr=str(reply.get("stderr", "")),
+        exit_code=reply.get("exit_code", -1) if isinstance(reply.get("exit_code"), int) else -1,
     )

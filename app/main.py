@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.executor import execute_magma, ExecutionResult
+from app.executor import execute_magma, ExecutionResult, SupervisorBusy
 from app.parser import parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
 from app.usage_logger import UsageLogger
@@ -154,7 +154,13 @@ async def execute(req: ExecuteRequest, request: Request):
     usage_logger.log(arrival)
 
     async with semaphore:
-        result: ExecutionResult = await execute_magma(req.code, settings)
+        try:
+            result: ExecutionResult = await execute_magma(req.code, settings)
+        except SupervisorBusy:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "All execution slots busy"},
+            )
 
     # Parse output
     parsed = parse_magma_output(result.stdout, settings.magma_output_bytes)
