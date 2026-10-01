@@ -1,0 +1,90 @@
+// Seccomp policy for magma.exe inside the nsjail jail (Kafel syntax).
+//
+// The first ALLOW group is what magma.exe -w -n used under strace on
+// 2026-10-01: integer factorization, elliptic curves with L-series,
+// SmallGroup, a number field class number, matrices over GF(7), GF(2^20),
+// Random and Cputime. The second group is the glibc/libstdc++ baseline that
+// other inputs may reach.
+//
+// nsjail loads this filter immediately before it execs magma.exe, so
+// execve is the only call nsjail itself needs after the load.
+//
+// Kafel names the stat family and uname by their kernel entry points:
+// newstat, newfstat, newlstat, newuname.
+
+#define AF_INET 2
+#define SOCK_DGRAM 2
+#define SOCK_TYPE_MASK 0xf
+
+// CLONE_NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET|NEWTIME
+#define CLONE_NEW_MASK 0x7e020080
+
+#define LOW32 0xffffffff
+#define TCGETS 0x5401
+#define TCGETS2 0x802c542a
+#define TIOCGWINSZ 0x5413
+#define FIONREAD 0x541b
+#define FIONBIO 0x5421
+#define FIOCLEX 0x5451
+#define SIOCGIFCONF 0x8912
+#define SIOCGIFFLAGS 0x8913
+#define SIOCGIFHWADDR 0x8927
+
+#define PR_SET_PDEATHSIG 1
+#define PR_GET_DUMPABLE 3
+#define PR_SET_DUMPABLE 4
+#define PR_SET_NAME 15
+#define PR_GET_NAME 16
+#define PR_SET_NO_NEW_PRIVS 38
+
+POLICY magma {
+  ALLOW {
+    // Measured.
+    access, arch_prctl, brk, clock_nanosleep, close, execve, exit_group,
+    newfstat, getcwd, getpid, getrandom, lseek, mmap, mprotect, munmap,
+    openat, pread64, prlimit64, read, rseq, rt_sigaction, rt_sigprocmask,
+    sched_getaffinity, sched_setaffinity, set_robust_list, set_tid_address,
+    newstat, times, newuname, write,
+
+    // The licence check reads the MAC address through a UDP socket.
+    socket(family, type) {
+      family == AF_INET && (type & SOCK_TYPE_MASK) == SOCK_DGRAM
+    },
+    // The kernel reads the request as a 32-bit int; a plain == would also
+    // demand a zero high word and kill a caller that sign-extends TCGETS2.
+    ioctl(fd, cmd) {
+      (cmd & LOW32) == TCGETS2 || (cmd & LOW32) == TCGETS ||
+      (cmd & LOW32) == TIOCGWINSZ || (cmd & LOW32) == SIOCGIFHWADDR ||
+      (cmd & LOW32) == SIOCGIFCONF || (cmd & LOW32) == SIOCGIFFLAGS ||
+      (cmd & LOW32) == FIONREAD || (cmd & LOW32) == FIOCLEX ||
+      (cmd & LOW32) == FIONBIO
+    },
+
+    // Baseline.
+    clone { (clone_flags & CLONE_NEW_MASK) == 0 },
+    prctl(option) {
+      option == PR_SET_NAME || option == PR_GET_NAME ||
+      option == PR_SET_DUMPABLE || option == PR_GET_DUMPABLE ||
+      option == PR_SET_NO_NEW_PRIVS || option == PR_SET_PDEATHSIG
+    },
+    futex, madvise, mremap, exit, getdents64, newfstatat, statx, readlink,
+    readlinkat, fcntl, dup, dup2, dup3, pipe, pipe2, poll, ppoll, select,
+    pselect6, epoll_create1, epoll_ctl, epoll_wait, wait4, waitid, kill,
+    tgkill, tkill, sigaltstack, gettid, getuid, geteuid, getgid, getegid,
+    getppid, getpgrp, sysinfo, getrusage, nanosleep, clock_gettime,
+    clock_getres, gettimeofday, sched_yield, rt_sigreturn, rt_sigsuspend,
+    rt_sigpending, rt_sigtimedwait, writev, readv, pwrite64, preadv, pwritev,
+    unlink, unlinkat, mkdir, mkdirat, rmdir, rename, renameat, renameat2,
+    ftruncate, truncate, fsync, fdatasync, fadvise64, flock, newlstat,
+    fstatfs, statfs, faccessat, faccessat2, chdir, fchdir, umask, utimensat,
+    memfd_create, mlock, munlock, getpriority, setpriority, sched_getparam,
+    sched_getscheduler, get_mempolicy, restart_syscall
+  },
+  // clone3 passes its flags in a struct seccomp cannot read, so it cannot
+  // get clone's CLONE_NEW* check. glibc falls back to clone on ENOSYS.
+  ERRNO(38) {
+    clone3
+  }
+}
+
+USE magma DEFAULT KILL_PROCESS

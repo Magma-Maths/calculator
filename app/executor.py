@@ -1,8 +1,19 @@
 import asyncio
 import os
+import signal
 from dataclasses import dataclass
 
 from app.config import Settings
+
+SECCOMP_POLICY = "/app/security/seccomp/magma.kafel"
+SECCOMP_KILLED = "killed by seccomp policy"
+# nsjail exits with 128 + signal when the jailed process dies by a signal,
+# and logs one of these lines at INFO on the stderr it shares with Magma.
+# Magma can exit 159 and print the SIGSYS line itself, but it cannot stop
+# nsjail logging a normal exit afterwards.
+NSJAIL_EXIT_SIGSYS = 128 + signal.SIGSYS
+NSJAIL_LOG_SIGSYS = "terminated with signal: SIGSYS (31)"
+NSJAIL_LOG_EXITED = "exited with status: "
 
 
 @dataclass
@@ -58,6 +69,8 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         "--cgroup_mem_max", str(settings.magma_memory_mb * 1024 * 1024),
         "--rlimit_cpu", str(settings.magma_cpu_timeout),
     ]
+    if settings.jail_seccomp:
+        cmd += ["--seccomp_policy", SECCOMP_POLICY]
     for var in magma_environment(root):
         cmd += ["--env", var]
     cmd += ["--", f"{root}/magma.exe", "-w", "-n"]
@@ -83,8 +96,21 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
             exit_code=-1,
         )
 
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    if (
+        settings.jail_seccomp
+        and proc.returncode == NSJAIL_EXIT_SIGSYS
+        and NSJAIL_LOG_SIGSYS in stderr
+        and NSJAIL_LOG_EXITED not in stderr
+    ):
+        return ExecutionResult(
+            stdout=stdout,
+            stderr=f"{SECCOMP_KILLED}\n{stderr}",
+            exit_code=-1,
+        )
     return ExecutionResult(
-        stdout=stdout_bytes.decode("utf-8", errors="replace"),
-        stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        stdout=stdout,
+        stderr=stderr,
         exit_code=proc.returncode or 0,
     )

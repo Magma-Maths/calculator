@@ -175,3 +175,15 @@ def test_cors_response_allows_all(mock_exec, client):
     )
     assert resp.status_code == 200
     assert resp.headers.get("access-control-allow-origin") == "*"
+
+
+def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_log):
+    resp = jailed_magma_killed_by_sigsys.post("/execute", json={"code": "print 1;"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is False
+    assert data["exit_code"] == -1
+    assert "killed by seccomp policy" in data["error"]
+    [_, completion] = _entries(usage_log)
+    assert completion["success"] is False
+    assert completion["warnings"] == data["warnings"]
