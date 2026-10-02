@@ -10,9 +10,10 @@ from tests.fake_nsjail import jail_mounts
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = ROOT / "security" / "seccomp" / "magma.kafel"
 
-# What magma.exe -w -n used under strace on 2026-10-01, by strace's names.
+# What magma.exe -w -n used under strace running the request wrapper, by
+# strace's names.
 MEASURED_SYSCALLS = """
-access arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd
+access alarm arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd
 getpid getrandom ioctl lseek mmap mprotect munmap openat pread64 prlimit64
 read rseq rt_sigaction rt_sigprocmask sched_getaffinity sched_setaffinity
 set_robust_list set_tid_address socket stat times uname write
@@ -94,6 +95,10 @@ def test_seccomp_policy_allows_measured_and_denies_escapes():
     assert missing == []
     assert sorted(allowed & set(DENIED_SYSCALLS)) == []
     assert "clone3" in _names_in(_policy_blocks("ERRNO(38)"))
+    (allow,) = _policy_blocks("ALLOW")
+    assert re.search(r"socket\(family, type, protocol\) \{[^}]*protocol == IPPROTO_IP", allow)
+    assert "(option == PR_SET_PDEATHSIG && arg2 == SIGKILL)" in allow
+    assert re.search(r"^#define SIGKILL 9$", POLICY.read_text(), re.M)
     assert POLICY.read_text().rstrip().splitlines()[-1] == "USE magma DEFAULT KILL_PROCESS"
 
 
