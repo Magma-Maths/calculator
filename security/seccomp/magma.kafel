@@ -1,10 +1,12 @@
 // Seccomp policy for magma.exe inside the nsjail jail (Kafel syntax).
 //
-// The first ALLOW group is what magma.exe -w -n used under strace on
-// 2026-10-01: integer factorization, elliptic curves with L-series,
-// SmallGroup, a number field class number, matrices over GF(7), GF(2^20),
-// Random and Cputime. The second group is the glibc/libstdc++ baseline that
-// other inputs may reach.
+// The first ALLOW group was measured on magma.exe -w -n running the
+// executor's request wrapper (wrap_magma_code: Alarm, SetIgnorePrompt)
+// around a mixed workload: integer factorization, elliptic curves with
+// L-series, SmallGroup, a number field class number, matrices over GF(7),
+// GF(2^20), Random and Cputime (strace, 2026-10-02).
+// The second group is the glibc/libstdc++ baseline that other inputs may
+// reach.
 //
 // nsjail loads this filter immediately before it execs magma.exe, so
 // execve is the only call nsjail itself needs after the load.
@@ -15,6 +17,7 @@
 #define AF_INET 2
 #define SOCK_DGRAM 2
 #define SOCK_TYPE_MASK 0xf
+#define IPPROTO_IP 0
 
 // CLONE_NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET|NEWTIME
 #define CLONE_NEW_MASK 0x7e020080
@@ -36,19 +39,21 @@
 #define PR_SET_NAME 15
 #define PR_GET_NAME 16
 #define PR_SET_NO_NEW_PRIVS 38
+#define SIGKILL 9
 
 POLICY magma {
   ALLOW {
     // Measured.
-    access, arch_prctl, brk, clock_nanosleep, close, execve, exit_group,
+    access, alarm, arch_prctl, brk, clock_nanosleep, close, execve, exit_group,
     newfstat, getcwd, getpid, getrandom, lseek, mmap, mprotect, munmap,
     openat, pread64, prlimit64, read, rseq, rt_sigaction, rt_sigprocmask,
     sched_getaffinity, sched_setaffinity, set_robust_list, set_tid_address,
     newstat, times, newuname, write,
 
     // The licence check reads the MAC address through a UDP socket.
-    socket(family, type) {
-      family == AF_INET && (type & SOCK_TYPE_MASK) == SOCK_DGRAM
+    socket(family, type, protocol) {
+      family == AF_INET && (type & SOCK_TYPE_MASK) == SOCK_DGRAM &&
+      protocol == IPPROTO_IP
     },
     // The kernel reads the request as a 32-bit int; a plain == would also
     // demand a zero high word and kill a caller that sign-extends TCGETS2.
@@ -62,10 +67,12 @@ POLICY magma {
 
     // Baseline.
     clone { (clone_flags & CLONE_NEW_MASK) == 0 },
-    prctl(option) {
+    // nsjail sets PR_SET_PDEATHSIG to SIGKILL; the job may only keep it.
+    prctl(option, arg2) {
       option == PR_SET_NAME || option == PR_GET_NAME ||
       option == PR_SET_DUMPABLE || option == PR_GET_DUMPABLE ||
-      option == PR_SET_NO_NEW_PRIVS || option == PR_SET_PDEATHSIG
+      option == PR_SET_NO_NEW_PRIVS ||
+      (option == PR_SET_PDEATHSIG && arg2 == SIGKILL)
     },
     futex, madvise, mremap, exit, getdents64, newfstatat, statx, readlink,
     readlinkat, fcntl, dup, dup2, dup3, pipe, pipe2, poll, ppoll, select,
