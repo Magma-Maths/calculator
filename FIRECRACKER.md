@@ -219,6 +219,13 @@ slot it manages.
   wall-clock kill; the supervisor re-truncates `stdout`/`stderr` to
   `output_bytes`/64 KiB on the way back out, so a guest that lies about
   truncation cannot inflate the reply.
+- **Encoded frame budget**: request and reply caps are measured on the
+  encoded JSON frame, where a control character takes six bytes, so code
+  heavy in control characters can be refused as too large below the API's
+  raw input limit; output that overflows is trimmed and marked truncated.
+- **Connection cap**: `max_connections` in `supervisor.json` (default
+  2 x slots + 2) counts every open API connection; beyond it the supervisor
+  answers `busy` and closes. A reply not read within 10 s is dropped.
 - **Timeout ceiling vs the unit's RuntimeMaxSec**: `max_timeout + boot_timeout
   + 5` (the longest a job can legitimately take, including the deadline
   margin in `_run_on_slot`) must stay below `RuntimeMaxSec` in
