@@ -20,6 +20,7 @@ log = logging.getLogger("magma-fc")
 
 GUEST_MAGMA_ROOT = "/opt/magma/current"
 STOP_GRACE = 8.0
+REPLY_WRITE_TIMEOUT = 10.0
 REQUEST_KEYS = {"code": str, "timeout": int, "cpu_timeout": int, "output_bytes": int}
 
 
@@ -275,25 +276,46 @@ class Runner:
         }
 
 
+async def _send_reply(writer: asyncio.StreamWriter, reply: dict) -> None:
+    """Write one reply frame and close, aborting a peer that will not read it."""
+    try:
+        await asyncio.wait_for(protocol.write_frame(writer, reply), timeout=REPLY_WRITE_TIMEOUT)
+    except (asyncio.TimeoutError, OSError):
+        writer.transport.abort()
+    finally:
+        writer.close()
+
+
 async def serve(runner: Runner, path: str, group: str | None):
+    # Counted from accept, so clients still sending a request or not yet
+    # reading their reply count against the cap as well as running jobs.
+    max_connections = runner.config.get("max_connections", 2 * len(runner.config["slots"]) + 2)
+    active = 0
+
     async def handle(reader, writer):
-        try:
-            request = await asyncio.wait_for(protocol.read_frame(reader, protocol.MAX_REQUEST_BYTES), timeout=10)
-        except asyncio.TimeoutError:
+        nonlocal active
+        if active >= max_connections:
+            writer.write(protocol.pack(_error("busy", "too many connections")))
             writer.close()
             return
-        except protocol.FrameError as exc:
-            await protocol.write_frame(writer, _error("bad_request", str(exc)))
-            writer.close()
-            return
+        active += 1
         try:
-            reply = await runner.run_job(request)
-        except Exception:
-            log.exception("unhandled error running job")
-            reply = _error("worker_failed", "internal error")
-        try:
-            await protocol.write_frame(writer, reply)
+            try:
+                request = await asyncio.wait_for(protocol.read_frame(reader, protocol.MAX_REQUEST_BYTES), timeout=10)
+            except (asyncio.TimeoutError, OSError):
+                writer.transport.abort()
+                return
+            except protocol.FrameError as exc:
+                await _send_reply(writer, _error("bad_request", str(exc)))
+                return
+            try:
+                reply = await runner.run_job(request)
+            except Exception:
+                log.exception("unhandled error running job")
+                reply = _error("worker_failed", "internal error")
+            await _send_reply(writer, reply)
         finally:
+            active -= 1
             writer.close()
 
     if os.path.exists(path):

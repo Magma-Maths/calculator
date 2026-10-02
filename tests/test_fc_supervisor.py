@@ -257,3 +257,54 @@ def test_bad_guest_seccomp_rejected_at_startup(config):
     config["guest_seccomp"] = "strict"
     with pytest.raises(ValueError):
         supervisor.Runner(config)
+
+
+def test_client_that_never_reads_is_dropped_after_the_write_deadline(config, monkeypatch):
+    monkeypatch.setattr(supervisor, "REPLY_WRITE_TIMEOUT", 0.3, raising=False)
+    big = {"stdout": "y" * 500_000, "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False}
+    host = FakeHost(config["jail_base"], agent_reply=big)
+
+    async def run():
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        await protocol.write_frame(writer, _request(output_bytes=500_000))
+        # Long enough for the job to finish and the write deadline to pass.
+        await asyncio.sleep(1.5)
+        try:
+            with pytest.raises(protocol.FrameError):
+                await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
+        finally:
+            writer.close()
+            server.close()
+            await server.wait_closed()
+        return runner
+
+    runner = asyncio.run(run())
+    assert runner.free_slots() == len(config["slots"])
+
+
+def test_connections_beyond_the_cap_are_refused(config):
+    config["max_connections"] = 1
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        _, idle = await asyncio.open_unix_connection(config["socket"])
+        await asyncio.sleep(0.1)
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        await protocol.write_frame(writer, _request())
+        t0 = time.monotonic()
+        reply = await asyncio.wait_for(protocol.read_frame(reader, protocol.MAX_REPLY_BYTES), timeout=5)
+        elapsed = time.monotonic() - t0
+        writer.close()
+        idle.close()
+        server.close()
+        await server.wait_closed()
+        return reply, elapsed
+
+    reply, elapsed = asyncio.run(run())
+    assert reply["error"] == "busy"
+    assert elapsed < 1
+    assert host.calls == []
