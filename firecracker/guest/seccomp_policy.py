@@ -8,8 +8,12 @@ import re
 
 MODES = ("on", "log", "off")
 
+# Traced on 2026-10-02 from magma.exe -w -n running a job built by
+# app.magma_cmd.wrap_magma_code, whose Alarm() prefix calls alarm(2), over a
+# mixed workload (factorization, elliptic curve with L-series, SmallGroup,
+# class number, matrices).
 OBSERVED = frozenset("""
-access arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd
+access alarm arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd
 getpid getrandom ioctl lseek mmap mprotect munmap openat pread64 prlimit64
 read rseq rt_sigaction rt_sigprocmask sched_getaffinity sched_setaffinity
 set_robust_list set_tid_address socket stat times uname write
@@ -43,8 +47,9 @@ PRCTL_ALLOWED = (
     4,   # PR_SET_DUMPABLE
     3,   # PR_GET_DUMPABLE
     38,  # PR_SET_NO_NEW_PRIVS
-    1,   # PR_SET_PDEATHSIG
 )
+PR_SET_PDEATHSIG = 1
+SIGKILL = 9
 IOCTL_ALLOWED = (
     0x802C542A,  # TCGETS2
     0x5401,      # TCGETS
@@ -64,9 +69,10 @@ LOW32 = 0xFFFFFFFF
 # datum_a, op "masked_eq" checks (arg & datum_a) == datum_b. Several rules
 # for one syscall are ORed; the conditions inside one rule are ANDed.
 _CONDITIONAL = {
-    "socket": [[(0, "eq", AF_INET, 0), (1, "masked_eq", SOCK_TYPE_MASK, SOCK_DGRAM)]],
+    "socket": [[(0, "eq", AF_INET, 0), (1, "masked_eq", SOCK_TYPE_MASK, SOCK_DGRAM), (2, "eq", 0, 0)]],
     "ioctl": [[(1, "masked_eq", LOW32, cmd)] for cmd in IOCTL_ALLOWED],
-    "prctl": [[(0, "eq", option, 0)] for option in PRCTL_ALLOWED],
+    "prctl": [[(0, "eq", option, 0)] for option in PRCTL_ALLOWED]
+    + [[(0, "eq", PR_SET_PDEATHSIG, 0), (1, "eq", SIGKILL, 0)]],
     "clone": [[(0, "masked_eq", CLONE_NEW_MASK, 0)]],
 }
 

@@ -7,7 +7,7 @@ from firecracker.guest import seccomp_policy as policy
 from firecracker.host import jail
 
 OBSERVED = (
-    "access arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd getpid getrandom ioctl lseek "
+    "access alarm arch_prctl brk clock_nanosleep close execve exit_group fstat getcwd getpid getrandom ioctl lseek "
     "mmap mprotect munmap openat pread64 prlimit64 read rseq rt_sigaction rt_sigprocmask sched_getaffinity "
     "sched_setaffinity set_robust_list set_tid_address socket stat times uname write"
 ).split()
@@ -59,7 +59,9 @@ def test_conditional_syscalls_carry_arg_checks():
         by_name.setdefault(name, []).append(conds)
     for name in ("socket", "ioctl", "prctl", "clone"):
         assert by_name[name] and all(by_name[name]), name
-    assert by_name["socket"] == [[(0, "eq", 2, 0), (1, "masked_eq", 0xF, 2)]]
+    assert by_name["socket"] == [[(0, "eq", 2, 0), (1, "masked_eq", 0xF, 2), (2, "eq", 0, 0)]]
+    assert [(0, "eq", 1, 0), (1, "eq", 9, 0)] in by_name["prctl"]  # PR_SET_PDEATHSIG, SIGKILL only
+    assert [(0, "eq", 1, 0)] not in by_name["prctl"]
     assert by_name["clone"] == [[(0, "masked_eq", policy.CLONE_NEW_MASK, 0)]]
     assert policy.CLONE_NEW_MASK & 0x10000000  # CLONE_NEWUSER
     assert [(1, "masked_eq", 0xFFFFFFFF, 0x8927)] in by_name["ioctl"]  # SIOCGIFHWADDR
