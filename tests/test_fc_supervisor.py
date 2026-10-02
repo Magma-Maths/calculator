@@ -34,8 +34,9 @@ def config(request):
 class FakeHost:
     """Fake systemctl + fake Firecracker vsock endpoint + fake agent."""
 
-    def __init__(self, base, agent_reply=None, boot=True, agent_delay=0.0, stop_leaves_cgroup=False):
+    def __init__(self, base, agent_reply=None, boot=True, agent_delay=0.0, stop_leaves_cgroup=False, agent_frame=None):
         self.base = base
+        self.agent_frame = agent_frame
         self.calls = []
         self.agent_reply = agent_reply or {"stdout": "2\n", "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False}
         self.boot = boot
@@ -56,7 +57,10 @@ class FakeHost:
                 writer.write(b"OK 1024\n"); await writer.drain()
                 self.seen_requests.append(await protocol.read_frame(reader, protocol.MAX_REQUEST_BYTES))
                 await asyncio.sleep(self.agent_delay)
-                await protocol.write_frame(writer, self.agent_reply)
+                if self.agent_frame is not None:
+                    writer.write(self.agent_frame); await writer.drain()
+                else:
+                    await protocol.write_frame(writer, self.agent_reply)
                 writer.close()
 
             self.servers[slot] = await asyncio.start_unix_server(handle, path=path)
@@ -307,4 +311,40 @@ def test_connections_beyond_the_cap_are_refused(config):
     reply, elapsed = asyncio.run(run())
     assert reply["error"] == "busy"
     assert elapsed < 1
+    assert host.calls == []
+
+
+def test_reply_that_overflows_the_frame_once_escaped_is_truncated(config, monkeypatch):
+    monkeypatch.setattr(protocol, "MAX_REPLY_BYTES", 64 * 1024)
+    # A guest may send raw UTF-8; the host re-encodes it with each "é" as \u00e9.
+    body = json.dumps(
+        {"stdout": "é" * 20_000, "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False},
+        ensure_ascii=False,
+    ).encode()
+    host = FakeHost(config["jail_base"], agent_frame=len(body).to_bytes(4, "big") + body)
+
+    async def run():
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        await protocol.write_frame(writer, _request(output_bytes=32 * 1024))
+        try:
+            return await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
+        finally:
+            writer.close()
+            server.close()
+            await server.wait_closed()
+
+    reply = asyncio.run(run())
+    assert reply["truncated"] is True
+    assert reply["exit_code"] == 0
+    assert reply["stdout"] and set(reply["stdout"]) == {"é"}
+
+
+def test_code_that_overflows_the_guest_frame_once_escaped_is_rejected(config):
+    host = FakeHost(config["jail_base"])
+    runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+    reply = asyncio.run(runner.run_job(_request(code="\x01" * 44_000)))
+    assert reply["error"] == "bad_request"
+    assert reply["stderr"] == "code too large"
     assert host.calls == []

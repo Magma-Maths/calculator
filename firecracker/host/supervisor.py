@@ -21,6 +21,7 @@ log = logging.getLogger("magma-fc")
 GUEST_MAGMA_ROOT = "/opt/magma/current"
 STOP_GRACE = 8.0
 REPLY_WRITE_TIMEOUT = 10.0
+GUEST_REQUEST_OVERHEAD = 16 * 1024
 REQUEST_KEYS = {"code": str, "timeout": int, "cpu_timeout": int, "output_bytes": int}
 
 
@@ -116,7 +117,9 @@ class Runner:
             return "timeout too large"
         if request["output_bytes"] > protocol.MAX_REPLY_BYTES // 2:
             return "output_bytes too large"
-        if len(request["code"].encode("utf-8")) > protocol.MAX_REQUEST_BYTES // 2:
+        # Measured as encoded, so escaping cannot push the guest request,
+        # which adds the environment and limits, past MAX_REQUEST_BYTES.
+        if len(protocol.encode(request["code"])) > protocol.MAX_REQUEST_BYTES - GUEST_REQUEST_OVERHEAD:
             return "code too large"
         return None
 
@@ -264,7 +267,7 @@ class Runner:
         log_lines = reply.get("seccomp_log", [])
         if not isinstance(log_lines, list):
             log_lines = []
-        return {
+        return protocol.fit_reply({
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else -1,
@@ -273,7 +276,7 @@ class Runner:
             "seccomp_killed": bool(reply.get("seccomp_killed", False)),
             "seccomp_mode": str(reply.get("seccomp_mode", ""))[:16],
             "seccomp_log": [str(line)[:200] for line in log_lines[:20]],
-        }
+        })
 
 
 async def _send_reply(writer: asyncio.StreamWriter, reply: dict) -> None:

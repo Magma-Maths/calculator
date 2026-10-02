@@ -78,6 +78,8 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
         "cpu_timeout": settings.magma_cpu_timeout,
         "output_bytes": settings.magma_output_bytes,
     }
+    if len(protocol.encode(request)) > protocol.MAX_REQUEST_BYTES:
+        return ExecutionResult(stdout="", stderr="input too large for the worker", exit_code=-1)
     try:
         reader, writer = await asyncio.open_unix_connection(settings.supervisor_socket)
     except OSError:

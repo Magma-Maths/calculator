@@ -1,10 +1,12 @@
 import os
+import socket
 import stat
 import textwrap
 import time
 
 import pytest
 
+from firecracker import protocol
 from firecracker.guest import agent
 
 FAKE = textwrap.dedent(
@@ -24,6 +26,8 @@ FAKE = textwrap.dedent(
         data = sys.stdin.read()
         if data.startswith("SLEEP"):
             time.sleep(30)
+        elif data.startswith("CONTROL"):
+            sys.stdout.write("\\x01" * 20 * 1024)
         elif data.startswith("FLOOD"):
             sys.stdout.write("x" * 500_000)
         elif data.startswith("FAIL"):
@@ -153,3 +157,16 @@ def test_run_job_reports_seccomp_kill(fake_magma):
     assert reply["timed_out"] is False
     assert reply["seccomp_killed"] is True
     assert reply["seccomp_mode"] == "off"
+
+
+def test_run_job_fits_escaped_output_in_one_frame(fake_magma, monkeypatch):
+    # 20 KiB of control characters is within the 32 KiB output cap but
+    # escapes to about 120 KiB, twice this frame limit.
+    monkeypatch.setattr(protocol, "MAX_REPLY_BYTES", 64 * 1024)
+    reply = agent.run_job(_req(fake_magma, "CONTROL", output_bytes=32 * 1024))
+    a, b = socket.socketpair()
+    with a, b:
+        protocol.send_frame(a, reply)
+        received = protocol.recv_frame(b, protocol.MAX_REPLY_BYTES)
+    assert received["truncated"] is True
+    assert received["stdout"] and set(received["stdout"]) == {"\x01"}

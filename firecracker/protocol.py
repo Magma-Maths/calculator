@@ -21,9 +21,45 @@ class FrameError(Exception):
     pass
 
 
+def encode(obj) -> bytes:
+    """The frame body for obj; JSON escaping can make it several times the raw text."""
+    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
 def pack(obj: dict) -> bytes:
-    body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    body = encode(obj)
     return _HEADER.pack(len(body)) + body
+
+
+def fit_reply(reply: dict, max_bytes: int | None = None) -> dict:
+    """Shorten stdout, then stderr, until the encoded reply fits in one frame.
+
+    Output caps count raw bytes, but escaping a control character takes six
+    bytes, so a reply within its caps can still overflow MAX_REPLY_BYTES.
+    """
+    if max_bytes is None:
+        max_bytes = MAX_REPLY_BYTES
+    if len(encode(reply)) <= max_bytes:
+        return reply
+    reply = dict(reply, truncated=True)
+    for key in ("stdout", "stderr"):
+        text = reply.get(key)
+        if not isinstance(text, str):
+            continue
+        reply[key] = ""
+        if len(encode(reply)) > max_bytes:
+            continue
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            reply[key] = text[:mid]
+            if len(encode(reply)) <= max_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        reply[key] = text[:lo]
+        break
+    return reply
 
 
 def unpack(payload: bytes) -> dict:

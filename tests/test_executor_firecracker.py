@@ -129,3 +129,17 @@ def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
         loop.close()
     assert body["truncated"] is True
     assert "The output is too long and has been truncated." in body["warnings"]
+
+
+def test_firecracker_backend_rejects_code_too_large_once_escaped(tmp_path):
+    settings = _settings(tmp_path)
+
+    async def run():
+        server, seen = await _fake_supervisor(settings.supervisor_socket, {"stdout": "", "stderr": "", "exit_code": 0})
+        result = await executor.execute_magma("\x01" * (protocol.MAX_REQUEST_BYTES // 6 + 1), settings)
+        server.close(); await server.wait_closed()
+        return result, seen
+
+    result, seen = asyncio.run(run())
+    assert result.exit_code == -1 and result.stderr == "input too large for the worker"
+    assert "request" not in seen
