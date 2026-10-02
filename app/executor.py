@@ -19,6 +19,7 @@ class ExecutionResult:
     stdout: str
     stderr: str
     exit_code: int
+    truncated: bool = False
 
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
@@ -102,4 +103,5 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
         stdout=str(reply.get("stdout", "")),
         stderr=str(reply.get("stderr", "")),
         exit_code=reply.get("exit_code", -1) if isinstance(reply.get("exit_code"), int) else -1,
+        truncated=reply.get("truncated") is True,
     )

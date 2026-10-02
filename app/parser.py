@@ -13,6 +13,8 @@ class ParseResult:
     warnings: list[str] = field(default_factory=list)
 
 
+TRUNCATION_WARNING = "The output is too long and has been truncated."
+
 _RE_VERSION = re.compile(r"Magma V(\d+\.\d+(-[A-Z]*\d+)?)")
 _RE_SEED = re.compile(r"\[Seed = (\d+)\]")
 _RE_FOOTER_START = re.compile(r"Total time:\s+\d+\.\d+ seconds, Total memory usage: ")
@@ -73,7 +75,7 @@ def parse_magma_output(stdout: str, max_output_bytes: int) -> ParseResult:
     if len(body) > max_output_bytes:
         body = body[:max_output_bytes]
         result.truncated = True
-        result.warnings.append("The output is too long and has been truncated.")
+        result.warnings.append(TRUNCATION_WARNING)
 
     result.stdout = body
     return result

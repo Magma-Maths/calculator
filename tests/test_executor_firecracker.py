@@ -106,3 +106,26 @@ def test_main_returns_503_on_busy(tmp_path, monkeypatch):
     client = TestClient(app_main.app)
     response = client.post("/execute", json={"code": "1;"})
     assert response.status_code == 503
+
+
+def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
+    import threading
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+
+    settings = _settings(tmp_path)
+    reply = {"stdout": "partial\n", "stderr": "", "exit_code": 0, "timed_out": False, "truncated": True}
+    loop = asyncio.new_event_loop()
+    server = loop.run_until_complete(_fake_supervisor(settings.supervisor_socket, reply))[0]
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(app_main, "settings", settings)
+    try:
+        body = TestClient(app_main.app).post("/execute", json={"code": "1;"}).json()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        server.close()
+        loop.close()
+    assert body["truncated"] is True
+    assert "The output is too long and has been truncated." in body["warnings"]
