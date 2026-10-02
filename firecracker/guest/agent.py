@@ -194,7 +194,7 @@ def run_job(request: dict, run_as_uid: int | None = None, mode: str | None = Non
         elif proc.returncode == -signal.SIGSYS:
             seccomp_killed = True
 
-    return {
+    return protocol.fit_reply({
         "stdout": captured["stdout"].decode("utf-8", errors="replace"),
         "stderr": captured["stderr"].decode("utf-8", errors="replace"),
         "exit_code": exit_code,
@@ -203,7 +203,7 @@ def run_job(request: dict, run_as_uid: int | None = None, mode: str | None = Non
         "seccomp_killed": seccomp_killed,
         "seccomp_mode": mode,
         "seccomp_log": _read_seccomp_log() if mode == "log" else [],
-    }
+    })
 
 
 def serve_one(mode: str, port: int = protocol.AGENT_PORT, run_as_uid: int | None = None) -> None:
