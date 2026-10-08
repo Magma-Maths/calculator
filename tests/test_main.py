@@ -168,6 +168,7 @@ def test_arrival_line_is_written_before_execution(client, usage_log):
     assert arrival["client_ip"] == "testclient"
     [_, completion] = _entries(usage_log)
     assert completion["event"] == "end" and completion["success"] is False
+    assert (completion["status"], completion["reason"]) == (500, "error")
     assert _stats()["all_time"]["failures"] == 1
 
 
@@ -224,6 +225,20 @@ def test_rate_limited_cors_response_exposes_retry_after(client, monkeypatch):
     assert resp.headers["access-control-expose-headers"] == "Retry-After"
 
 
+def test_requests_turned_away_before_admission_are_logged(client, monkeypatch, caplog, usage_log):
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(per_minute=0, per_hour=0))
+    with caplog.at_level("INFO", logger="calculator"):
+        assert client.post("/execute", json={"code": "1;"}).status_code == 429
+        assert client.post("/execute", json={"code": "x" * (50 * 1024 + 1)}).status_code == 413
+    records = [json.loads(r.getMessage()) for r in caplog.records if r.name == "calculator"]
+    assert [(r["event"], r["status"], r["reason"]) for r in records] == [
+        ("rejected", 429, "rate_limited"), ("rejected", 413, "too_large"),
+    ]
+    assert _entries(usage_log) == []
+
+
 def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_log):
     resp = jailed_magma_killed_by_sigsys.post("/execute", json={"code": "print 1;"})
     assert resp.status_code == 200
@@ -234,6 +249,7 @@ def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_l
     [_, completion] = _entries(usage_log)
     assert completion["success"] is False
     assert completion["warnings"] == [data["error"]]
+    assert (completion["status"], completion["reason"]) == (200, "completed")
     assert data["warnings"] == []
 
 
