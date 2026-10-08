@@ -231,6 +231,9 @@ async def _run(code: str, outcome: dict):
             response_data["error"] = stderr_warnings[0]
         elif parsed.warnings:
             response_data["error"] = parsed.warnings[0]
+        else:
+            response_data["error"] = f"Execution failed (exit code {result.exit_code})"
+        response_data["warnings"] = [w for w in all_warnings if w != response_data.get("error")]
 
     outcome.update(memory_used=parsed.memory, success=success, warnings=all_warnings)
     return response_data

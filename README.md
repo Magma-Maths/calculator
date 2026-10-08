@@ -33,7 +33,7 @@ Content-Type: application/json
 }
 ```
 
-When warnings are present (timeout, runtime error, output truncation), `success` is `false` and an `error` field is added with the first warning:
+When warnings are present (timeout, runtime error, output truncation), `success` is `false`, `error` carries the first one (a stderr warning before an output warning), and `warnings` lists the rest:
 
 ```json
 {
@@ -47,10 +47,12 @@ When warnings are present (timeout, runtime error, output truncation), `success`
     "time_sec": null,
     "memory": null
   },
-  "warnings": ["Runtime error in Magma"],
+  "warnings": [],
   "error": "Runtime error in Magma"
 }
 ```
+
+A failure with no warning still gets an `error`: `Execution failed (exit code N)`.
 
 **Error responses** return `{"error": "..."}` with no other fields:
 
