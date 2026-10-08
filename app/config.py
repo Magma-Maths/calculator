@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -11,8 +13,9 @@ class Settings(BaseSettings):
     magma_output_kb: int = 20
     jail_seccomp: bool = True
 
-    # Execution backend: "nsjail" (in-container jail) or "firecracker" (supervisor socket)
-    executor_backend: str = "nsjail"
+    # No default: a worker whose environment omits it must not start on the
+    # in-container jail when the host was meant to run Firecracker.
+    executor_backend: Literal["nsjail", "firecracker"]
     supervisor_socket: str = "/run/magma-fc/supervisor.sock"
 
     # Service

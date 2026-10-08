@@ -143,6 +143,8 @@ Edit `calculator.env`. Key settings:
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
 
+`EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
+
 ### 3a. Start Traefik (once per host)
 
 Traefik runs as a shared reverse proxy. If you already have a Traefik instance on the host, skip this step; just make sure its Docker network is named `traefik`.
@@ -180,6 +182,7 @@ docker run --rm \
   --cap-add SYS_ADMIN \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
+  -e EXECUTOR_BACKEND=nsjail \
   -p 8080:8080 \
   ghcr.io/magma-maths/calculator:v0.1.0
 ```

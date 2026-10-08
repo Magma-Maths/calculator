@@ -95,7 +95,7 @@ jobs:
           cache-to: ${{ env.PUBLISH == 'true' && 'type=gha,mode=max' || '' }}
 
       - name: Smoke test the image
-        run: docker run --rm ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }} python -c "import app.main"
+        run: docker run --rm -e EXECUTOR_BACKEND=nsjail ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }} python -c "import app.main"
 
       - name: Push
         if: env.PUBLISH == 'true'

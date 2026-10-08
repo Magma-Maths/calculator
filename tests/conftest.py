@@ -7,8 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.config import Settings
-from app.executor import ExecutionResult, wrap_magma_code
+# Settings has no default backend; set before app.main is first imported.
+os.environ.setdefault("EXECUTOR_BACKEND", "nsjail")
+
+from app.config import Settings  # noqa: E402
+from app.executor import ExecutionResult, wrap_magma_code  # noqa: E402
 
 FAKE_MAGMA = str(Path(__file__).parent / "fake_magma.py")
 FAKE_NSJAIL = str(Path(__file__).parent / "fake_nsjail.py")
