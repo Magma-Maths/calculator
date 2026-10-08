@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import socket
@@ -11,10 +12,21 @@ import pytest
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
-from app.executor import ExecutionResult
+from app.executor import ExecutionResult, SupervisorBusy, SupervisorUnavailable
+from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    # rate_limiter is a module-level singleton shared by the whole pytest
+    # session; without this, enough tests posting to /execute from the
+    # TestClient's fixed "testclient" IP eventually trips a real 429.
+    from app import main
+    main.rate_limiter._requests.clear()
+    yield
 
 
 @pytest.fixture
@@ -304,3 +316,229 @@ def test_clients_behind_a_trusted_proxy_get_separate_rate_limits(tmp_path):
 def test_forwarded_for_from_an_untrusted_peer_is_ignored(tmp_path):
     statuses = _rate_limit_statuses(tmp_path, "192.0.2.1", ["198.51.100.1", "198.51.100.2"])
     assert [s == 429 for s in statuses] == [False, True]
+
+
+@pytest.fixture
+def submission_log(tmp_path, monkeypatch):
+    """Point main's submission logger at a fresh file and return that path."""
+    from app import main
+    path = tmp_path / "submissions.jsonl"
+    monkeypatch.setattr(main, "submission_logger", SubmissionLogger(str(path)))
+    return path
+
+
+def test_submission_logged_before_execution(client, submission_log):
+    seen_by_executor = []
+
+    async def snapshot_then_run(code, settings):
+        seen_by_executor.extend(_entries(submission_log))
+        return ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+
+    with patch("app.main.execute_magma", side_effect=snapshot_then_run):
+        resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+
+    [arrival] = seen_by_executor
+    assert arrival["client_ip"] == "testclient"
+    assert arrival["code"] == "print 1+1;"
+    assert arrival["timestamp"]
+
+    [_, completion] = _entries(submission_log)
+    assert completion["request_id"] == arrival["request_id"]
+    assert completion["exit_code"] == 0
+    assert completion["timed_out"] is False
+    assert completion["seccomp_killed"] is False
+    assert completion["elapsed"] >= 0
+
+
+def test_submission_logs_one_completion_even_for_an_unrecognized_exception(client, submission_log, usage_log):
+    # An unrecognized exception is not a hang: the outer finally always
+    # runs, so both logs get exactly one outcome line, never a silent
+    # arrival with no matching completion.
+    async def boom(code, settings):
+        raise RuntimeError("magma never came back")
+
+    with patch("app.main.execute_magma", side_effect=boom), pytest.raises(RuntimeError):
+        client.post("/execute", json={"code": "print 1+1;"})
+
+    [arrival, completion] = _entries(submission_log)
+    assert arrival["client_ip"] == "testclient"
+    assert arrival["code"] == "print 1+1;"
+    assert completion["request_id"] == arrival["request_id"]
+    assert completion["outcome"] == "error"
+    assert completion["elapsed"] >= 0
+    assert "code" not in completion
+
+    [_, usage_completion] = _entries(usage_log)
+    assert (usage_completion["status"], usage_completion["reason"]) == (500, "error")
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_submission_logs_timed_out(mock_exec, client, submission_log):
+    mock_exec.return_value = ExecutionResult(
+        stdout="Magma V2.29-4 [Seed = 1]\nquit.\n",
+        stderr="Alarm clock\n",
+        exit_code=0,
+        timed_out=True,
+    )
+    resp = client.post("/execute", json={"code": "while true do end while;"})
+    assert resp.status_code == 200
+
+    [_, completion] = _entries(submission_log)
+    assert completion["timed_out"] is True
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_submission_logs_resource_stats(mock_exec, client, submission_log):
+    mock_exec.return_value = ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+
+    [_, completion] = _entries(submission_log)
+    assert completion["time_sec"] == 0.05
+    assert completion["memory_mb"] == 12.34
+    assert completion["stdout_bytes"] == len("2\n")
+    assert completion["stdout_truncated"] is False
+    assert completion["stdout_bytes_raw"] == len(MOCK_MAGMA_STDOUT)
+    assert completion["stderr_bytes"] == 0
+    assert completion["in_flight_at_admission"] == 0
+
+
+def test_submission_too_large_logs_metadata_only(client, submission_log):
+    big_code = "x" * (50 * 1024 + 1)
+    resp = client.post("/execute", json={"code": big_code})
+    assert resp.status_code == 413
+
+    [entry] = _entries(submission_log)
+    assert entry["reason"] == "too_large"
+    assert entry["input_size"] == len(big_code)
+    assert "code" not in entry
+
+
+def test_submission_rate_limited_logs_metadata_only(client, submission_log, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main.rate_limiter, "is_allowed", lambda ip: False)
+
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 429
+
+    [entry] = _entries(submission_log)
+    assert entry["reason"] == "rate_limited"
+    assert entry["input_size"] == len("print 1+1;")
+    assert "code" not in entry
+
+
+def test_repeated_429s_cannot_grow_the_log_with_code(client, submission_log, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main.rate_limiter, "is_allowed", lambda ip: False)
+
+    # Control characters cost the most to escape in JSON; a 429 that kept
+    # this body would turn a 50 KB post into a line several times larger.
+    near_limit_code = "\x01" * (50 * 1024)
+    for _ in range(5):
+        resp = client.post("/execute", json={"code": near_limit_code})
+        assert resp.status_code == 429
+
+    entries = _entries(submission_log)
+    assert len(entries) == 5
+    for entry in entries:
+        assert "code" not in entry
+        assert entry["input_size"] == len(near_limit_code)
+    assert max(len(json.dumps(e)) for e in entries) < 1024
+
+
+def test_submission_slots_busy_logs_metadata_only(client, submission_log, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "semaphore", asyncio.Semaphore(0))
+
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 503
+
+    [entry] = _entries(submission_log)
+    assert entry["reason"] == "busy"
+    assert entry["input_size"] == len("print 1+1;")
+    assert "code" not in entry
+
+
+def test_submission_busy_supervisor_writes_completion_line(client, submission_log):
+    async def busy(code, settings):
+        raise SupervisorBusy()
+
+    with patch("app.main.execute_magma", side_effect=busy):
+        resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 503
+
+    [arrival, completion] = _entries(submission_log)
+    assert arrival["code"] == "print 1+1;"
+    assert completion["request_id"] == arrival["request_id"]
+    assert completion["outcome"] == "busy"
+    assert completion["elapsed"] >= 0
+
+
+def test_submission_unavailable_supervisor_writes_completion_line(client, submission_log):
+    # A request the supervisor turns away after admission (busy or
+    # unavailable) was already counted by the rate limiter, so it keeps
+    # its code; only the completion's outcome marks why it did not run.
+    async def unavailable(code, settings):
+        raise SupervisorUnavailable()
+
+    with patch("app.main.execute_magma", side_effect=unavailable):
+        resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 503
+
+    [arrival, completion] = _entries(submission_log)
+    assert arrival["code"] == "print 1+1;"
+    assert completion["request_id"] == arrival["request_id"]
+    assert completion["outcome"] == "unavailable"
+    assert completion["elapsed"] >= 0
+
+
+def test_write_error_does_not_permanently_disable_submission_log(client, submission_log, monkeypatch):
+    calls = {"n": 0}
+    import app.submission_logger as sl_module
+    original_open = sl_module.os.open
+
+    def flaky_open(path, flags, mode):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("ENOSPC (simulated)")
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(sl_module.os, "open", flaky_open)
+
+    with patch("app.main.execute_magma", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+        resp1 = client.post("/execute", json={"code": "print 1;"})
+        resp2 = client.post("/execute", json={"code": "print 2;"})
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    # The first write's arrival line failed to open (simulated ENOSPC) and was
+    # dropped, but the logger must not have latched off: the second request's
+    # arrival and completion lines both land.
+    entries = _entries(submission_log)
+    assert [e.get("code") for e in entries if "code" in e] == ["print 2;"]
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_submission_logging_disabled_when_empty(mock_exec, client, monkeypatch, tmp_path):
+    from app import main
+    mock_exec.return_value = ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+    monkeypatch.setattr(main, "submission_logger", SubmissionLogger(""))
+
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+    assert list(tmp_path.iterdir()) == []
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_submission_unwritable_path_does_not_break_request(mock_exec, client, monkeypatch, tmp_path):
+    from app import main
+    mock_exec.return_value = ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(main, "submission_logger", SubmissionLogger(str(blocker / "submissions.jsonl")))
+
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
