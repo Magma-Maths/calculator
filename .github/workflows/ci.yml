@@ -81,11 +81,11 @@ jobs:
         # promote.yml looks up sha-<first 7 hex chars>; the length must match here.
         run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ env.PUBLISH == 'true' }}
+          load: true
           tags: |
             ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
             ${{ env.IMAGE }}:main
@@ -93,3 +93,12 @@ jobs:
           # mode=max also caches the nsjail-builder stage, which the final image does not contain.
           # Only main writes the cache: a fork pull request has no permission to.
           cache-to: ${{ env.PUBLISH == 'true' && 'type=gha,mode=max' || '' }}
+
+      - name: Smoke test the image
+        run: docker run --rm ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }} python -c "import app.main"
+
+      - name: Push
+        if: env.PUBLISH == 'true'
+        run: |
+          docker push ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
+          docker push ${{ env.IMAGE }}:main
