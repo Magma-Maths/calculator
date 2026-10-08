@@ -171,7 +171,8 @@ def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
         server.close()
         loop.close()
     assert body["truncated"] is True
-    assert "The output is too long and has been truncated." in body["warnings"]
+    assert body["error"] == "The output is too long and has been truncated."
+    assert body["warnings"] == []
 
 
 def test_main_returns_413_for_code_too_large_once_escaped(tmp_path, monkeypatch):

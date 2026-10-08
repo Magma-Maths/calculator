@@ -79,7 +79,30 @@ def test_execute_timeout(mock_exec, client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is False
-    assert any("time limit" in w for w in data["warnings"])
+    assert "time limit" in data["error"]
+    assert data["warnings"] == []
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_failure_without_a_warning_still_has_an_error(mock_exec, client):
+    # As from a guest that never started: no output and nothing the parser recognises.
+    mock_exec.return_value = ExecutionResult(stdout="", stderr="", exit_code=-1)
+    data = client.post("/execute", json={"code": "1;"}).json()
+    assert data["success"] is False
+    assert data["error"] == "Execution failed (exit code -1)"
+    assert data["warnings"] == []
+
+
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_error_is_not_repeated_in_warnings(mock_exec, client):
+    from app.parser import TRUNCATION_WARNING
+    mock_exec.return_value = ExecutionResult(
+        stdout="Magma V2.29-4 [Seed = 1]\nquit.\n", stderr="Alarm clock\n", exit_code=0, truncated=True,
+    )
+    data = client.post("/execute", json={"code": "1;"}).json()
+    assert data["success"] is False
+    assert "time limit" in data["error"]
+    assert data["warnings"] == [TRUNCATION_WARNING]
 
 
 @pytest.fixture
@@ -210,7 +233,8 @@ def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_l
     assert "killed by seccomp policy" in data["error"]
     [_, completion] = _entries(usage_log)
     assert completion["success"] is False
-    assert completion["warnings"] == data["warnings"]
+    assert completion["warnings"] == [data["error"]]
+    assert data["warnings"] == []
 
 
 def _rate_limit_statuses(tmp_path, forwarded_allow_ips, forwarded_for):
