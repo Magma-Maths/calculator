@@ -1,11 +1,17 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from app import executor
 from app.config import Settings
 from firecracker import protocol
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 async def _fake_supervisor(path, reply):
@@ -91,8 +97,17 @@ def test_firecracker_backend_socket_missing(tmp_path):
     assert result.exit_code == -1 and "unavailable" in result.stderr
 
 
-def test_default_backend_is_nsjail():
-    assert Settings().executor_backend == "nsjail"
+@pytest.mark.parametrize("backend", [None, "", "nsjial"])
+def test_service_refuses_to_start_without_a_known_backend(backend):
+    env = {k: v for k, v in os.environ.items() if k != "EXECUTOR_BACKEND"}
+    if backend is not None:
+        env["EXECUTOR_BACKEND"] = backend
+    proc = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "executor_backend" in proc.stderr
 
 
 def test_main_returns_503_on_busy(tmp_path, monkeypatch):
