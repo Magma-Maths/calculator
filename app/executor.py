@@ -31,6 +31,9 @@ SECCOMP_KILLED = "killed by seccomp policy"
 NSJAIL_EXIT_SIGSYS = 128 + signal.SIGSYS
 NSJAIL_LOG_SIGSYS = "terminated with signal: SIGSYS (31)"
 NSJAIL_LOG_EXITED = "exited with status: "
+# Shared with app/parser.py so the warning it derives from stderr text and
+# the executor's own `timed_out` flag never disagree about what counts.
+TIMEOUT_STDERR_MARKERS = ("Alarm clock", "Cputime limit exceeded", "Killed")
 
 
 @dataclass
@@ -39,6 +42,14 @@ class ExecutionResult:
     stderr: str
     exit_code: int
     truncated: bool = False
+    timed_out: bool = False
+    seccomp_killed: bool = False
+    # Firecracker only: measured by the guest agent independently of
+    # stdout, since the footer they would otherwise come from is lost
+    # whenever output is truncated or the job is killed. nsjail has only
+    # ever had the footer.
+    cpu_time_sec: float | None = None
+    peak_memory_kb: int | None = None
 
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
@@ -83,6 +94,7 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
             stdout="",
             stderr="Killed",
             exit_code=-1,
+            timed_out=True,
         )
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -97,11 +109,13 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
             stdout=stdout,
             stderr=f"{SECCOMP_KILLED}\n{stderr}",
             exit_code=-1,
+            seccomp_killed=True,
         )
     return ExecutionResult(
         stdout=stdout,
         stderr=stderr,
         exit_code=proc.returncode or 0,
+        timed_out=any(marker in stderr for marker in TIMEOUT_STDERR_MARKERS),
     )
 
 
@@ -142,4 +156,11 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
         stderr=str(reply.get("stderr", "")),
         exit_code=reply.get("exit_code", -1) if isinstance(reply.get("exit_code"), int) else -1,
         truncated=reply.get("truncated") is True,
+        timed_out=reply.get("timed_out") is True,
+        seccomp_killed=reply.get("seccomp_killed") is True,
+        # Bounded again here, defensively, rather than trusting that the
+        # supervisor already did: the same untrusted guest value, one hop
+        # later.
+        cpu_time_sec=protocol.bounded_cpu_time_sec(reply.get("cpu_time_sec")),
+        peak_memory_kb=protocol.bounded_memory_kb(reply.get("peak_memory_kb")),
     )

@@ -16,6 +16,11 @@ MAX_REPLY_BYTES = 1024 * 1024
 # Room the supervisor leaves for the environment and limits it adds to the guest request.
 GUEST_REQUEST_OVERHEAD = 16 * 1024
 CODE_TOO_LARGE = "code too large"
+# Sanity bounds for the guest's self-reported resource usage: a job cannot
+# legitimately run longer, or hold more memory, than its own request limits
+# allow by many orders of magnitude.
+MAX_CPU_TIME_SEC = 24 * 60 * 60
+MAX_MEMORY_KB = 1024 * 1024 * 1024  # 1 TiB
 
 _HEADER = struct.Struct(">I")
 
@@ -32,6 +37,30 @@ def encode(obj) -> bytes:
 def code_fits(code: str) -> bool:
     """Whether the supervisor accepts code of this size; measured encoded, as escaping can grow it sixfold."""
     return len(encode(code)) <= MAX_REQUEST_BYTES - GUEST_REQUEST_OVERHEAD
+
+
+def bounded_cpu_time_sec(value) -> float | None:
+    """Rejects out-of-range input that would otherwise raise OverflowError
+    on a later unit conversion, or serialize as non-standard JSON (inf/nan).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value:  # NaN: the only value unequal to itself; math.isfinite()
+        return None     # would work too, but raises OverflowError on a huge int.
+    if value < 0 or value > MAX_CPU_TIME_SEC:
+        return None
+    return float(value)
+
+
+def bounded_memory_kb(value) -> int | None:
+    """Real rusage memory is always a whole KiB count; a float here is
+    already a sign the value did not come from getrusage(2).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > MAX_MEMORY_KB:
+        return None
+    return value
 
 
 def pack(obj: dict) -> bytes:

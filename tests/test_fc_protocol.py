@@ -95,3 +95,34 @@ def test_async_read_frame_rejects_oversize():
         await server.wait_closed()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("value", [10**400, float("inf"), float("nan"), -1, -0.5])
+def test_bounded_cpu_time_sec_rejects_out_of_range(value):
+    assert protocol.bounded_cpu_time_sec(value) is None
+
+
+@pytest.mark.parametrize("value", ["5", None, True, False, [1], {"a": 1}])
+def test_bounded_cpu_time_sec_rejects_wrong_type(value):
+    assert protocol.bounded_cpu_time_sec(value) is None
+
+
+def test_bounded_cpu_time_sec_accepts_sane_values():
+    assert protocol.bounded_cpu_time_sec(0) == 0.0
+    assert protocol.bounded_cpu_time_sec(1.5) == 1.5
+    assert protocol.bounded_cpu_time_sec(protocol.MAX_CPU_TIME_SEC) == float(protocol.MAX_CPU_TIME_SEC)
+    assert protocol.bounded_cpu_time_sec(protocol.MAX_CPU_TIME_SEC + 1) is None
+
+
+@pytest.mark.parametrize("value", [10**400, float("inf"), float("nan"), -1, 12.5, "5", None, True, False])
+def test_bounded_memory_kb_rejects_invalid(value):
+    # Float is rejected outright, even a finite in-range one: real rusage
+    # memory is always a whole number of KiB.
+    assert protocol.bounded_memory_kb(value) is None
+
+
+def test_bounded_memory_kb_accepts_sane_values():
+    assert protocol.bounded_memory_kb(0) == 0
+    assert protocol.bounded_memory_kb(20480) == 20480
+    assert protocol.bounded_memory_kb(protocol.MAX_MEMORY_KB) == protocol.MAX_MEMORY_KB
+    assert protocol.bounded_memory_kb(protocol.MAX_MEMORY_KB + 1) is None
