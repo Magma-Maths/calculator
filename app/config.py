@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Execution backend: "nsjail" (in-container jail) or "firecracker" (supervisor socket)
     executor_backend: str = "nsjail"
     supervisor_socket: str = "/run/magma-fc/supervisor.sock"
+    # JSON written by the worker's host checks; /health/deep fails while it
+    # lists problems. Empty skips it, as on hosts without those checks.
+    health_status_file: str = ""
 
     # Service
     max_concurrent: int = 4
