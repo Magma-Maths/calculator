@@ -1,0 +1,13 @@
+.git
+_worktrees/
+docs/
+tests/
+infrastructure/
+*.tar.gz
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+.venv*/
+venv/
+**/*.egg-info/
+.env
