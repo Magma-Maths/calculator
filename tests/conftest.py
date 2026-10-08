@@ -199,3 +199,14 @@ def real_magma():
         from app.main import app
         from fastapi.testclient import TestClient
         yield TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limits(monkeypatch):
+    """Each test starts with empty buckets; the module-level limiter would otherwise
+    count every POST /execute in the session against "testclient"."""
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(
+        per_minute=main.settings.rate_limit_per_minute, per_hour=main.settings.rate_limit_per_hour,
+    ))

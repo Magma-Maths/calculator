@@ -121,17 +121,22 @@ def test_request_is_logged_before_execution(client, usage_log):
     assert _stats()["last_24h"]["total_requests"] == 1
 
 
-def test_arrival_line_outlives_an_execution_that_never_returns(client, usage_log):
-    async def vanish(code, settings):
+def test_arrival_line_is_written_before_execution(client, usage_log):
+    during = []
+
+    async def crash(code, settings):
+        during.extend(_entries(usage_log))
         raise RuntimeError("magma never came back")
 
-    with patch("app.main.execute_magma", side_effect=vanish), pytest.raises(RuntimeError):
+    with patch("app.main.execute_magma", side_effect=crash), pytest.raises(RuntimeError):
         client.post("/execute", json={"code": "print 1+1;"})
 
-    [arrival] = _entries(usage_log)
+    [arrival] = during
     assert arrival["event"] == "start"
     assert arrival["client_ip"] == "testclient"
-    assert _stats()["all_time"]["total_requests"] == 0
+    [_, completion] = _entries(usage_log)
+    assert completion["event"] == "end" and completion["success"] is False
+    assert _stats()["all_time"]["failures"] == 1
 
 
 def test_rejected_request_leaves_no_arrival_line(client, usage_log):
