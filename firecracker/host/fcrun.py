@@ -14,7 +14,7 @@ async def run(socket_path: str, code: str, timeout: int, output_bytes: int) -> d
         await protocol.write_frame(writer, {"code": wrap_magma_code(code, timeout), "timeout": timeout, "cpu_timeout": timeout, "output_bytes": output_bytes})
         return await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
     finally:
-        writer.close()
+        await protocol.close_writer(writer)
 
 
 def main() -> int:

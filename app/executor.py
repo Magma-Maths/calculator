@@ -119,7 +119,7 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
     except (asyncio.TimeoutError, protocol.FrameError, OSError) as exc:
         return ExecutionResult(stdout="", stderr=f"worker service error: {exc}", exit_code=-1)
     finally:
-        writer.close()
+        await protocol.close_writer(writer)
     if reply.get("error") == "busy":
         raise SupervisorBusy()
     if reply.get("seccomp_killed") is True:
