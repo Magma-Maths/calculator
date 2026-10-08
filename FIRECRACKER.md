@@ -1,7 +1,7 @@
 # Firecracker worker
 
 Operator notes for the Firecracker backend: an alternative to the in-container
-nsjail sandbox that runs each `/execute` job in its own cold-booted microVM.
+nsjail sandbox that runs each `/execute` job in its own freshly booted microVM.
 Code lives under `firecracker/`; the API opts in with `EXECUTOR_BACKEND=firecracker`
 (see `calculator.env.example`).
 
@@ -39,6 +39,22 @@ jailer, which chroots and execs Firecracker. Inside the guest, init mounts the
 Magma image, creates the licence interface lic0, administratively down, with
 the slot's MAC, and runs the agent, which handles exactly one job and powers
 the guest off.
+
+Each free slot keeps its next guest booted, with the host already connected
+to the agent on vsock, so a job skips the boot. The job's code and
+environment reach the guest only at hand-off. After the job the slot is
+released as before and a replacement boots in the background. A job that
+finds no ready slot waits for a booting one and fails if that boot fails
+or its guest is unusable by the time the job resumes.
+If the idle guest has died or aged out by hand-off, the supervisor releases
+it and runs the job once on a fresh boot. Either way a job waits at most one
+release (`TimeoutStopSec` plus the 8 s drain) and one `boot_timeout` before
+its code reaches a guest. With the deployed values (5 + 8 + 20 s, plus a
+125 s exchange at `max_timeout` 120) that stays inside the API's
+`magma_timeout + 60` read deadline. A failed background boot is not
+retried; the next job on that slot boots on demand. Idle guests hold their
+memory. Stopping the supervisor waits for any staging or cleanup still
+running, then tears the idle guests down.
 
 With `EXECUTOR_BACKEND=firecracker`, the API container runs as the image's
 `calculator` user, since it no longer needs root for nsjail's namespace
@@ -175,9 +191,9 @@ cannot flood the host log; `journalctl -u magma-fc@<slot>` instead carries
 Firecracker's and the jailer's own startup errors (a bad config.json, a
 missing image, a jailer chroot failure) for that slot's unit.
 
-After a clean run the unit is inactive, the slot's jail directory is gone
-(the supervisor removes it once the unit's cgroup drains), and the slot is
-back in the free pool. A slot that fails to drain within the stop grace
+After a clean run the unit is stopped and, once its cgroup drains, the
+slot's jail directory is removed. The slot goes back in the free pool and
+its unit starts again to boot the replacement guest. A slot that fails to drain within the stop grace
 period is quarantined: this is in-process supervisor state, not something
 systemd or the filesystem shows. The slot is withheld from new jobs until
 the supervisor restarts, its jail directory is left in place for
@@ -197,7 +213,8 @@ nothing of their own. Every `run_job()` call, including `bad_request` and
 `busy` ones, ends with one info line naming the slot (or `-` when none was
 claimed), the outcome, and the free and quarantined slot counts. One line
 at startup reports the same two counts after the supervisor resets every
-slot it manages.
+slot it manages. A slot quarantined while idle logs `idle <slot>
+quarantined (N free, N quarantined)` with the same counts.
 
 ## 8. Limits and where they are set
 
@@ -208,7 +225,10 @@ slot it manages.
   the guest), independent of and larger than the guest's own RAM.
 - **Unit wall-clock ceiling**: `RuntimeMaxSec=150` in `magma-fc@.service`;
   systemd stops the unit if a job, including guest boot, runs longer than
-  this regardless of what the agent or supervisor are doing.
+  this regardless of what the agent or supervisor are doing. Idle time
+  counts too. The supervisor therefore reboots a guest that has waited
+  `RuntimeMaxSec - max_timeout - 5` seconds (at least `boot_timeout`)
+  without a job. With 150 and 120 that is every 25 s per idle slot.
 - **Per-job timeout, CPU timeout, output cap**: `timeout`, `cpu_timeout`,
   `output_bytes` on the request, sourced from the API's `MAGMA_TIMEOUT`,
   `MAGMA_CPU_TIMEOUT`, `MAGMA_OUTPUT_KB` settings. `max_timeout` in
