@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import time
 
 import pytest
@@ -112,3 +113,30 @@ def test_connect_rejects_bad_handshake(tmp_path):
         assert elapsed >= 0.8
 
     asyncio.run(run())
+
+
+def test_connect_retries_past_connection_refused(tmp_path):
+    path = str(tmp_path / "vsock.sock")
+    # A listening socket that exits without unlinking leaves a socket file
+    # that refuses new connections, the same as a crashed firecracker.
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(path)
+    stale.listen(1)
+    stale.close()
+
+    async def run():
+        async def replace_with_real_server():
+            await asyncio.sleep(0.4)
+            os.unlink(path)
+            return await _fake_firecracker(path)
+
+        server_task = asyncio.create_task(replace_with_real_server())
+        reader, writer = await vsock.connect(path, 52, deadline=time.monotonic() + 5)
+        data = await reader.read(100)
+        writer.close()
+        server = await server_task
+        server.close()
+        await server.wait_closed()
+        return data
+
+    assert asyncio.run(run()) == b"payload"
