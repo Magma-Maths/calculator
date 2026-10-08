@@ -12,7 +12,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.executor import execute_magma, ExecutionResult, SupervisorBusy
+from app.executor import (
+    ExecutionResult,
+    InputTooLargeForWorker,
+    SupervisorBusy,
+    SupervisorUnavailable,
+    execute_magma,
+)
 from app.parser import TRUNCATION_WARNING, parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
 from app.usage_logger import UsageLogger
@@ -153,13 +159,42 @@ async def execute(req: ExecuteRequest, request: Request):
     logger.info(json.dumps(arrival))
     usage_logger.log(arrival)
 
+    outcome = {"memory_used": None, "success": False, "warnings": []}
+    try:
+        return await _run(req.code, outcome)
+    finally:
+        completion = {
+            "event": "end",
+            "request_id": request_id,
+            "timestamp": _utc_timestamp(),
+            "client_ip": client_ip,
+            "input_size": len(req.code),
+            "elapsed_sec": round(time.time() - start_time, 3),
+            **outcome,
+        }
+        logger.info(json.dumps(completion))
+        usage_logger.log(completion)
+
+
+async def _run(code: str, outcome: dict):
+    """The /execute reply for admitted code; fills outcome for the completion record."""
     async with semaphore:
         try:
-            result: ExecutionResult = await execute_magma(req.code, settings)
+            result: ExecutionResult = await execute_magma(code, settings)
         except SupervisorBusy:
             return JSONResponse(
                 status_code=503,
                 content={"error": "All execution slots busy"},
+            )
+        except SupervisorUnavailable:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Execution service unavailable"},
+            )
+        except InputTooLargeForWorker:
+            return JSONResponse(
+                status_code=413,
+                content={"error": "Input too large"},
             )
 
     # Parse output
@@ -194,21 +229,7 @@ async def execute(req: ExecuteRequest, request: Request):
         elif parsed.warnings:
             response_data["error"] = parsed.warnings[0]
 
-    elapsed = time.time() - start_time
-    log_entry = {
-        "event": "end",
-        "request_id": request_id,
-        "timestamp": _utc_timestamp(),
-        "client_ip": client_ip,
-        "input_size": len(req.code),
-        "elapsed_sec": round(elapsed, 3),
-        "memory_used": parsed.memory,
-        "success": success,
-        "warnings": all_warnings,
-    }
-    logger.info(json.dumps(log_entry))
-    usage_logger.log(log_entry)
-
+    outcome.update(memory_used=parsed.memory, success=success, warnings=all_warnings)
     return response_data
 
 

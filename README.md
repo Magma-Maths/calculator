@@ -56,10 +56,10 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 
 | Status | Meaning | Notes |
 |--------|---------|-------|
-| 413 | Input too large | Exceeds `MAGMA_INPUT_KB` |
+| 413 | Input too large | Exceeds `MAGMA_INPUT_KB`, or the Firecracker request frame once JSON-escaped |
 | 422 | Missing `code` field | FastAPI validation error |
 | 429 | Rate limit exceeded | Includes `Retry-After: 60` header |
-| 503 | All execution slots busy | Try again later |
+| 503 | All execution slots busy | Try again later; also returned while the Firecracker supervisor is unreachable |
 
 ### GET /health
 
