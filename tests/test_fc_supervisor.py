@@ -348,3 +348,20 @@ def test_code_that_overflows_the_guest_frame_once_escaped_is_rejected(config):
     assert reply["error"] == "bad_request"
     assert reply["stderr"] == "code too large"
     assert host.calls == []
+
+
+def test_reset_quarantines_a_slot_whose_release_raises(config):
+    """A release failure during startup reset() must quarantine that slot,
+    not crash the whole supervisor before it ever opens its socket."""
+    async def systemctl(args):
+        if args == ["stop", "magma-fc@slot1.service"]:
+            raise OSError("systemctl not found")
+        return 0, ""
+
+    async def cgroup_populated(unit):
+        return False
+
+    runner = supervisor.Runner(config, systemctl=systemctl, cgroup_populated=cgroup_populated)
+    asyncio.run(runner.reset())
+    assert runner.quarantined() == ["slot1"]
+    assert runner.free_slots() == 1

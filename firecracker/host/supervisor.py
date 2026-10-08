@@ -196,7 +196,12 @@ class Runner:
         """
         clean = []
         for slot in self._slots:
-            if await self._release(slot):
+            try:
+                ok = await self._release(slot)
+            except Exception:
+                log.exception("release failed for %s during reset; quarantining", slot.name)
+                ok = False
+            if ok:
                 clean.append(slot)
             else:
                 self._quarantined.append(slot.name)
