@@ -138,6 +138,7 @@ Edit `calculator.env`. Key settings:
 | `JAIL_SECCOMP` | True | Load the seccomp policy `security/seccomp/magma.kafel` into the jail |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
+| `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is Traefik's in `traefik/docker-compose.yml` |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
@@ -157,6 +158,8 @@ cd ..
 ```
 
 This creates the `traefik` Docker network, binds ports 80/443, and handles Let's Encrypt certificates automatically. The dashboard is available on `127.0.0.1:8080`.
+
+The network is pinned to `172.30.0.0/24` with Traefik at `172.30.0.2`, because the calculator's rate limits key on the client address it reads from `X-Forwarded-For`, and it accepts that header only from `FORWARDED_ALLOW_IPS` (default `172.30.0.2`). With your own Traefik, set `FORWARDED_ALLOW_IPS` in `calculator.env` to its address on the shared network; otherwise every request counts against Traefik's address and one client can use up the limit for everyone. A `traefik` network created before this pin has to be removed and recreated.
 
 ### 3b. Run with docker-compose (production)
 
