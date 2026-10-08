@@ -124,3 +124,19 @@ async def read_frame(reader: asyncio.StreamReader, max_bytes: int) -> dict:
 async def write_frame(writer: asyncio.StreamWriter, obj: dict) -> None:
     writer.write(pack(obj))
     await writer.drain()
+
+
+CLOSE_TIMEOUT = 5.0
+
+
+async def close_writer(writer: asyncio.StreamWriter, timeout: float = CLOSE_TIMEOUT) -> None:
+    """Close writer and wait briefly for the transport to finish closing.
+
+    A peer that stops reading can leave wait_closed() pending on unacked
+    send-buffer bytes, so the wait is capped rather than left open-ended.
+    """
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout)
+    except (asyncio.TimeoutError, OSError):
+        pass
