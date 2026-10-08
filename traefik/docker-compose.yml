@@ -22,12 +22,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - acme:/acme
     networks:
-      - traefik
+      traefik:
+        # The calculator trusts X-Forwarded-For only from this address.
+        ipv4_address: 172.30.0.2
     restart: unless-stopped
 
 networks:
   traefik:
     name: traefik
+    ipam:
+      config:
+        # Dynamic addresses come from ip_range, so no container can take traefik's.
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
 
 volumes:
   acme:
