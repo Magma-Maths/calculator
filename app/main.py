@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app import deep_health
 from app.config import Settings
 from app.executor import (
     ExecutionResult,
@@ -114,6 +115,12 @@ def _utc_timestamp() -> str:
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/deep")
+async def health_deep():
+    status_code, body = await deep_health.check(settings, semaphore)
+    return JSONResponse(status_code=status_code, content=body)
 
 
 @app.get("/stats")
