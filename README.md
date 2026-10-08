@@ -73,6 +73,8 @@ A failure with no warning still gets an `error`: `Execution failed (exit code N)
 
 Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
 
+Each line is also printed as JSON to the service log. A completion line carries the HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large` or `error`. A request turned away before admission prints only an `"event": "rejected"` line, with `status` and `reason` (`too_large`, `rate_limited` or `busy`), and leaves `USAGE_LOG_FILE` and the statistics untouched.
+
 ```json
 {
   "all_time": {

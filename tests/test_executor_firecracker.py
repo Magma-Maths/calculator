@@ -28,13 +28,13 @@ async def _fake_supervisor(path, reply):
 
 
 def _usage_events(tmp_path, monkeypatch):
-    """Point main's usage log at a fresh file; returns a reader of (event, success) pairs."""
+    """Point main's usage log at a fresh file; returns a reader of (event, status, reason)."""
     from app import main as app_main
     from app.usage_logger import UsageLogger
 
     path = tmp_path / "usage.jsonl"
     monkeypatch.setattr(app_main, "usage_logger", UsageLogger(str(path)))
-    return lambda: [(e["event"], e.get("success")) for e in map(json.loads, path.read_text().splitlines())]
+    return lambda: [(e["event"], e.get("status"), e.get("reason")) for e in map(json.loads, path.read_text().splitlines())]
 
 
 def _settings(tmp_path):
@@ -120,7 +120,7 @@ def test_main_returns_503_when_the_supervisor_is_unreachable(tmp_path, monkeypat
         sock.close()
     assert response.status_code == 503
     assert response.json() == {"error": "Execution service unavailable"}
-    assert events() == [("start", None), ("end", False)]
+    assert events() == [("start", None, None), ("end", 503, "unavailable")]
 
 
 @pytest.mark.parametrize("backend", [None, "", "nsjial"])
@@ -148,7 +148,7 @@ def test_main_returns_503_on_busy(tmp_path, monkeypatch):
     client = TestClient(app_main.app)
     response = client.post("/execute", json={"code": "1;"})
     assert response.status_code == 503
-    assert events() == [("start", None), ("end", False)]
+    assert events() == [("start", None, None), ("end", 503, "busy")]
 
 
 def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
@@ -187,7 +187,7 @@ def test_main_returns_413_for_code_too_large_once_escaped(tmp_path, monkeypatch)
     response = TestClient(app_main.app).post("/execute", json={"code": code})
     assert response.status_code == 413
     assert response.json() == {"error": "Input too large"}
-    assert events() == [("start", None), ("end", False)]
+    assert events() == [("start", None, None), ("end", 413, "too_large")]
 
 
 @pytest.mark.parametrize("code", ["\x01" * 42_000, "1;"], ids=["over-code-limit", "small"])
