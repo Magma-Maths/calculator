@@ -257,6 +257,15 @@ slot it manages.
   ```
   This must fail or time out.
 
+### Accepted residual risk
+
+A job that escapes Magma and gains root inside its own guest can read the
+Magma image attached to that guest. A read-only disk protects the image's
+integrity, not its secrecy, and any process can read the binary it is
+running. The guest still gives no route to the host, to other slots or to
+the metadata server. This exposure is accepted for the public service
+(2026-10-08).
+
 ### Seccomp
 
 The agent loads a seccomp allow-list on the Magma child after dropping to
