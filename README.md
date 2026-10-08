@@ -33,7 +33,7 @@ Content-Type: application/json
 }
 ```
 
-When warnings are present (timeout, runtime error, output truncation), `success` is `false` and an `error` field is added with the first warning:
+When warnings are present (timeout, runtime error, output truncation), `success` is `false`, `error` carries the first one (a stderr warning before an output warning), and `warnings` lists the rest:
 
 ```json
 {
@@ -47,19 +47,21 @@ When warnings are present (timeout, runtime error, output truncation), `success`
     "time_sec": null,
     "memory": null
   },
-  "warnings": ["Runtime error in Magma"],
+  "warnings": [],
   "error": "Runtime error in Magma"
 }
 ```
+
+A failure with no warning still gets an `error`: `Execution failed (exit code N)`.
 
 **Error responses** return `{"error": "..."}` with no other fields:
 
 | Status | Meaning | Notes |
 |--------|---------|-------|
-| 413 | Input too large | Exceeds `MAGMA_INPUT_KB` |
+| 413 | Input too large | Exceeds `MAGMA_INPUT_KB`, or the Firecracker request frame once JSON-escaped |
 | 422 | Missing `code` field | FastAPI validation error |
-| 429 | Rate limit exceeded | Includes `Retry-After: 60` header |
-| 503 | All execution slots busy | Try again later |
+| 429 | Rate limit exceeded | Includes `Retry-After: 60` header, readable from browser scripts through `Access-Control-Expose-Headers` |
+| 503 | All execution slots busy | Try again later; also returned while the Firecracker supervisor is unreachable |
 
 ### GET /health
 
@@ -70,6 +72,8 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 ### GET /stats
 
 Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
+
+Each line is also printed as JSON to the service log. A completion line carries the HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large` or `error`. A request turned away before admission prints only an `"event": "rejected"` line, with `status` and `reason` (`too_large`, `rate_limited` or `busy`), and leaves `USAGE_LOG_FILE` and the statistics untouched.
 
 ```json
 {
@@ -138,10 +142,13 @@ Edit `calculator.env`. Key settings:
 | `JAIL_SECCOMP` | True | Load the seccomp policy `security/seccomp/magma.kafel` into the jail |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
+| `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is Traefik's in `traefik/docker-compose.yml` |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
+
+`EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
 
 ### 3a. Start Traefik (once per host)
 
@@ -155,6 +162,8 @@ cd ..
 ```
 
 This creates the `traefik` Docker network, binds ports 80/443, and handles Let's Encrypt certificates automatically. The dashboard is available on `127.0.0.1:8080`.
+
+The network is pinned to `172.30.0.0/24` with Traefik at `172.30.0.2`, because the calculator's rate limits key on the client address it reads from `X-Forwarded-For`, and it accepts that header only from `FORWARDED_ALLOW_IPS` (default `172.30.0.2`). With your own Traefik, set `FORWARDED_ALLOW_IPS` in `calculator.env` to its address on the shared network; otherwise every request counts against Traefik's address and one client can use up the limit for everyone. A `traefik` network created before this pin has to be removed and recreated.
 
 ### 3b. Run with docker-compose (production)
 
@@ -180,6 +189,7 @@ docker run --rm \
   --cap-add SYS_ADMIN \
   --tmpfs /tmp:size=128m \
   -v /opt/magma:/opt/magma:ro \
+  -e EXECUTOR_BACKEND=nsjail \
   -p 8080:8080 \
   ghcr.io/magma-maths/calculator:v0.1.0
 ```

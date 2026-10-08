@@ -42,7 +42,8 @@ def test_error_handling(fake_magma):
     data = resp.json()
     assert data["success"] is False
     assert "User error" in data["stdout"]
-    assert any("error" in w.lower() for w in data["warnings"])
+    assert "error" in data["error"].lower()
+    assert data["error"] not in data["warnings"]
 
 
 def test_full_response_structure(fake_magma):

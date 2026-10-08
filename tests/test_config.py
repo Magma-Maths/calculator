@@ -95,3 +95,12 @@ def test_allowed_origins_list_custom(monkeypatch):
     origins = settings.allowed_origins_list
     assert "https://magma-maths.org" in origins
     assert "http://localhost" in origins
+
+
+def test_compose_leaves_settings_to_the_env_file():
+    """An environment: entry in compose would silently override calculator.env."""
+    import yaml
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    environment = compose["services"]["calculator"].get("environment") or {}
+    keys = environment if isinstance(environment, dict) else [e.split("=")[0] for e in environment]
+    assert not {k.lower() for k in keys} & set(Settings.model_fields)

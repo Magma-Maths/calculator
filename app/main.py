@@ -12,7 +12,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.executor import execute_magma, ExecutionResult, SupervisorBusy
+from app.executor import (
+    ExecutionResult,
+    InputTooLargeForWorker,
+    SupervisorBusy,
+    SupervisorUnavailable,
+    execute_magma,
+)
 from app.parser import TRUNCATION_WARNING, parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
 from app.usage_logger import UsageLogger
@@ -90,6 +96,9 @@ async def cors_middleware(request: Request, call_next):
     elif origin and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
+    if "Access-Control-Allow-Origin" in response.headers:
+        # Browsers hide non-safelisted headers such as the 429 Retry-After from scripts.
+        response.headers["Access-Control-Expose-Headers"] = "Retry-After"
 
     return response
 
@@ -112,6 +121,27 @@ async def stats():
     return usage_logger.stats()
 
 
+def _reject(status: int, reason: str, message: str, client_ip: str, input_size: int, headers=None):
+    """Answer a request turned away before admission; logged only, so /stats is unchanged."""
+    logger.info(json.dumps({
+        "event": "rejected",
+        "timestamp": _utc_timestamp(),
+        "client_ip": client_ip,
+        "input_size": input_size,
+        "status": status,
+        "reason": reason,
+    }))
+    return JSONResponse(status_code=status, content={"error": message}, headers=headers)
+
+
+# The status, reason and message for each failure the executor raises.
+_EXECUTOR_REJECTIONS = {
+    SupervisorBusy: (503, "busy", "All execution slots busy"),
+    SupervisorUnavailable: (503, "unavailable", "Execution service unavailable"),
+    InputTooLargeForWorker: (413, "too_large", "Input too large"),
+}
+
+
 @app.post("/execute")
 async def execute(req: ExecuteRequest, request: Request):
     start_time = time.time()
@@ -119,26 +149,17 @@ async def execute(req: ExecuteRequest, request: Request):
 
     # Check input size
     if len(req.code.encode("utf-8")) > settings.magma_input_bytes:
-        return JSONResponse(
-            status_code=413,
-            content={"error": "Input too large"},
-        )
+        return _reject(413, "too_large", "Input too large", client_ip, len(req.code))
 
     # Check rate limit
     if not rate_limiter.is_allowed(client_ip):
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Rate limit exceeded"},
-            headers={"Retry-After": "60"},
-        )
+        return _reject(429, "rate_limited", "Rate limit exceeded", client_ip, len(req.code),
+                       headers={"Retry-After": "60"})
 
     # Try to acquire concurrency slot without blocking
     acquired = semaphore.locked() is False or semaphore._value > 0
     if not acquired:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "All execution slots busy"},
-        )
+        return _reject(503, "busy", "All execution slots busy", client_ip, len(req.code))
 
     # Persisted before execution so that a run which never returns still
     # leaves a record; the completion line below carries the same request_id.
@@ -153,14 +174,33 @@ async def execute(req: ExecuteRequest, request: Request):
     logger.info(json.dumps(arrival))
     usage_logger.log(arrival)
 
+    # An exception leaves the 500 defaults in place.
+    outcome = {"status": 500, "reason": "error", "memory_used": None, "success": False, "warnings": []}
+    try:
+        return await _run(req.code, outcome)
+    finally:
+        completion = {
+            "event": "end",
+            "request_id": request_id,
+            "timestamp": _utc_timestamp(),
+            "client_ip": client_ip,
+            "input_size": len(req.code),
+            "elapsed_sec": round(time.time() - start_time, 3),
+            **outcome,
+        }
+        logger.info(json.dumps(completion))
+        usage_logger.log(completion)
+
+
+async def _run(code: str, outcome: dict):
+    """The /execute reply for admitted code; fills outcome for the completion record."""
     async with semaphore:
         try:
-            result: ExecutionResult = await execute_magma(req.code, settings)
-        except SupervisorBusy:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "All execution slots busy"},
-            )
+            result: ExecutionResult = await execute_magma(code, settings)
+        except tuple(_EXECUTOR_REJECTIONS) as exc:
+            status, reason, message = _EXECUTOR_REJECTIONS[type(exc)]
+            outcome.update(status=status, reason=reason)
+            return JSONResponse(status_code=status, content={"error": message})
 
     # Parse output
     parsed = parse_magma_output(result.stdout, settings.magma_output_bytes)
@@ -193,26 +233,18 @@ async def execute(req: ExecuteRequest, request: Request):
             response_data["error"] = stderr_warnings[0]
         elif parsed.warnings:
             response_data["error"] = parsed.warnings[0]
+        else:
+            response_data["error"] = f"Execution failed (exit code {result.exit_code})"
+        response_data["warnings"] = [w for w in all_warnings if w != response_data.get("error")]
 
-    elapsed = time.time() - start_time
-    log_entry = {
-        "event": "end",
-        "request_id": request_id,
-        "timestamp": _utc_timestamp(),
-        "client_ip": client_ip,
-        "input_size": len(req.code),
-        "elapsed_sec": round(elapsed, 3),
-        "memory_used": parsed.memory,
-        "success": success,
-        "warnings": all_warnings,
-    }
-    logger.info(json.dumps(log_entry))
-    usage_logger.log(log_entry)
-
+    outcome.update(status=200, reason="completed", memory_used=parsed.memory, success=success, warnings=all_warnings)
     return response_data
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.port)
+    uvicorn.run(
+        "app.main:app", host="0.0.0.0", port=settings.port,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
+    )
