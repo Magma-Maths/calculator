@@ -218,6 +218,8 @@ If that happens to legitimate code, rerun it with `JAIL_SECCOMP=false` to confir
 Then find the missing call by running the same input under `strace -f` on the host, and add it to the policy.
 Turn the switch back on afterwards: it is a diagnostic, not a setting to leave off.
 
+An alternate backend runs each job inside its own Firecracker microVM instead of nsjail, for hosts that need per-request kernel isolation. Set `EXECUTOR_BACKEND=firecracker` and `SUPERVISOR_SOCKET` to the host's supervisor socket; see [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+
 ## Development
 
 ```bash

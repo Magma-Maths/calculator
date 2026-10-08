@@ -1,0 +1,18 @@
+[Unit]
+Description=Magma Firecracker supervisor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=PYTHONPATH=/opt/magma-fc/src
+Environment=MAGMA_FC_CONFIG=/etc/magma-fc/supervisor.json
+ExecStart=/usr/bin/python3 -m firecracker.host.supervisor
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=magma-fc
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

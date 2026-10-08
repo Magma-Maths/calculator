@@ -1,0 +1,29 @@
+#!/bin/bash
+# Launch one jailed Firecracker for slot $1 inside this unit's cgroup.
+# The supervisor has already staged /srv/magma-fc/jails/firecracker/$1/root.
+set -euo pipefail
+
+id=${1:?missing slot id}
+[[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,63}$ ]] || exit 64
+: "${FC_UID:?}" "${FC_GID:?}" "${FC_DIR:?}" "${FC_JAIL_BASE:?}"
+[[ "$FC_UID" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$FC_GID" =~ ^[1-9][0-9]*$ ]] || exit 64
+
+cg=$(awk -F: '$1 == "0" && $2 == "" {print $3}' /proc/self/cgroup)
+[[ -n "$cg" && "$cg" != "/" ]] || exit 70
+[[ -f "/sys/fs/cgroup${cg}/cgroup.procs" ]] || exit 70
+[[ -f "$FC_JAIL_BASE/firecracker/$id/root/config.json" ]] || exit 66
+
+exec "$FC_DIR/jailer" \
+  --id "$id" \
+  --exec-file "$FC_DIR/firecracker" \
+  --uid "$FC_UID" \
+  --gid "$FC_GID" \
+  --chroot-base-dir "$FC_JAIL_BASE" \
+  --cgroup-version 2 \
+  --parent-cgroup "${cg#/}" \
+  --new-pid-ns \
+  --resource-limit no-file=256 \
+  -- \
+  --no-api \
+  --config-file /config.json
