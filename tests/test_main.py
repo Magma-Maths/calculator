@@ -191,6 +191,16 @@ def test_cors_response_allows_all(mock_exec, client):
     assert resp.headers.get("access-control-allow-origin") == "*"
 
 
+def test_rate_limited_cors_response_exposes_retry_after(client, monkeypatch):
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(per_minute=0, per_hour=0))
+    resp = client.post("/execute", json={"code": "1;"}, headers={"Origin": "https://example.com"})
+    assert resp.status_code == 429
+    assert resp.headers["retry-after"] == "60"
+    assert resp.headers["access-control-expose-headers"] == "Retry-After"
+
+
 def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_log):
     resp = jailed_magma_killed_by_sigsys.post("/execute", json={"code": "print 1;"})
     assert resp.status_code == 200

@@ -96,6 +96,9 @@ async def cors_middleware(request: Request, call_next):
     elif origin and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
+    if "Access-Control-Allow-Origin" in response.headers:
+        # Browsers hide non-safelisted headers such as the 429 Retry-After from scripts.
+        response.headers["Access-Control-Expose-Headers"] = "Retry-After"
 
     return response
 
