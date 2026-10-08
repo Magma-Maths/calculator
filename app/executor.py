@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 class SupervisorBusy(Exception):
     """Every Firecracker slot is in use; the caller should answer 503."""
 
+
+class SupervisorUnavailable(Exception):
+    """The supervisor socket refused or dropped the connection attempt; answer 503."""
+
+
+class InputTooLargeForWorker(Exception):
+    """The code fits MAGMA_INPUT_KB but not the worker frame once JSON-escaped; answer 413."""
+
 SECCOMP_POLICY = "/app/security/seccomp/magma.kafel"
 SECCOMP_KILLED = "killed by seccomp policy"
 # nsjail exits with 128 + signal when the jailed process dies by a signal,
@@ -104,12 +112,12 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
         "cpu_timeout": settings.magma_cpu_timeout,
         "output_bytes": settings.magma_output_bytes,
     }
-    if len(protocol.encode(request)) > protocol.MAX_REQUEST_BYTES:
-        return ExecutionResult(stdout="", stderr="input too large for the worker", exit_code=-1)
+    if not protocol.code_fits(wrapped):
+        raise InputTooLargeForWorker()
     try:
         reader, writer = await asyncio.open_unix_connection(settings.supervisor_socket)
-    except OSError:
-        return ExecutionResult(stdout="", stderr="worker service unavailable", exit_code=-1)
+    except OSError as exc:
+        raise SupervisorUnavailable() from exc
     try:
         await protocol.write_frame(writer, request)
         reply = await asyncio.wait_for(
@@ -122,6 +130,8 @@ async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionR
         writer.close()
     if reply.get("error") == "busy":
         raise SupervisorBusy()
+    if reply.get("error") == "bad_request" and reply.get("stderr") == protocol.CODE_TOO_LARGE:
+        raise InputTooLargeForWorker()
     if reply.get("seccomp_killed") is True:
         log_lines = reply.get("seccomp_log") or [""]
         logger.warning(

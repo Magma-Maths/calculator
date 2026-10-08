@@ -21,7 +21,6 @@ log = logging.getLogger("magma-fc")
 GUEST_MAGMA_ROOT = "/opt/magma/current"
 STOP_GRACE = 8.0
 REPLY_WRITE_TIMEOUT = 10.0
-GUEST_REQUEST_OVERHEAD = 16 * 1024
 REQUEST_KEYS = {"code": str, "timeout": int, "cpu_timeout": int, "output_bytes": int}
 
 
@@ -117,10 +116,8 @@ class Runner:
             return "timeout too large"
         if request["output_bytes"] > protocol.MAX_REPLY_BYTES // 2:
             return "output_bytes too large"
-        # Measured as encoded, so escaping cannot push the guest request,
-        # which adds the environment and limits, past MAX_REQUEST_BYTES.
-        if len(protocol.encode(request["code"])) > protocol.MAX_REQUEST_BYTES - GUEST_REQUEST_OVERHEAD:
-            return "code too large"
+        if not protocol.code_fits(request["code"]):
+            return protocol.CODE_TOO_LARGE
         return None
 
     async def run_job(self, request: dict) -> dict:

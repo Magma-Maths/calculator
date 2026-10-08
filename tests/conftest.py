@@ -7,8 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.config import Settings
-from app.executor import ExecutionResult, wrap_magma_code
+# Settings has no default backend; set before app.main is first imported.
+os.environ.setdefault("EXECUTOR_BACKEND", "nsjail")
+
+from app.config import Settings  # noqa: E402
+from app.executor import ExecutionResult, wrap_magma_code  # noqa: E402
 
 FAKE_MAGMA = str(Path(__file__).parent / "fake_magma.py")
 FAKE_NSJAIL = str(Path(__file__).parent / "fake_nsjail.py")
@@ -196,3 +199,14 @@ def real_magma():
         from app.main import app
         from fastapi.testclient import TestClient
         yield TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limits(monkeypatch):
+    """Each test starts with empty buckets; the module-level limiter would otherwise
+    count every POST /execute in the session against "testclient"."""
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(
+        per_minute=main.settings.rate_limit_per_minute, per_hour=main.settings.rate_limit_per_hour,
+    ))

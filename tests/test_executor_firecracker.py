@@ -1,11 +1,18 @@
 import asyncio
 import json
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from app import executor
 from app.config import Settings
 from firecracker import protocol
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 async def _fake_supervisor(path, reply):
@@ -18,6 +25,16 @@ async def _fake_supervisor(path, reply):
 
     server = await asyncio.start_unix_server(handle, path=path)
     return server, seen
+
+
+def _usage_events(tmp_path, monkeypatch):
+    """Point main's usage log at a fresh file; returns a reader of (event, status, reason)."""
+    from app import main as app_main
+    from app.usage_logger import UsageLogger
+
+    path = tmp_path / "usage.jsonl"
+    monkeypatch.setattr(app_main, "usage_logger", UsageLogger(str(path)))
+    return lambda: [(e["event"], e.get("status"), e.get("reason")) for e in map(json.loads, path.read_text().splitlines())]
 
 
 def _settings(tmp_path):
@@ -85,14 +102,38 @@ def test_firecracker_backend_logs_seccomp_kill(tmp_path, caplog):
     assert "seccomp filter killed magma (mode=on)" in caplog.text
 
 
-def test_firecracker_backend_socket_missing(tmp_path):
+@pytest.mark.parametrize("listening", [False, True], ids=["missing", "refused"])
+def test_main_returns_503_when_the_supervisor_is_unreachable(tmp_path, monkeypatch, listening):
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+
     settings = _settings(tmp_path)
-    result = asyncio.run(executor.execute_magma("1;", settings))
-    assert result.exit_code == -1 and "unavailable" in result.stderr
+    sock = socket.socket(socket.AF_UNIX)
+    if listening:
+        # Bound but never listening: connect() fails with ECONNREFUSED.
+        sock.bind(settings.supervisor_socket)
+    monkeypatch.setattr(app_main, "settings", settings)
+    events = _usage_events(tmp_path, monkeypatch)
+    try:
+        response = TestClient(app_main.app).post("/execute", json={"code": "1;"})
+    finally:
+        sock.close()
+    assert response.status_code == 503
+    assert response.json() == {"error": "Execution service unavailable"}
+    assert events() == [("start", None, None), ("end", 503, "unavailable")]
 
 
-def test_default_backend_is_nsjail():
-    assert Settings().executor_backend == "nsjail"
+@pytest.mark.parametrize("backend", [None, "", "nsjial"])
+def test_service_refuses_to_start_without_a_known_backend(backend):
+    env = {k: v for k, v in os.environ.items() if k != "EXECUTOR_BACKEND"}
+    if backend is not None:
+        env["EXECUTOR_BACKEND"] = backend
+    proc = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "executor_backend" in proc.stderr
 
 
 def test_main_returns_503_on_busy(tmp_path, monkeypatch):
@@ -103,9 +144,11 @@ def test_main_returns_503_on_busy(tmp_path, monkeypatch):
         raise executor.SupervisorBusy()
 
     monkeypatch.setattr(app_main, "execute_magma", busy)
+    events = _usage_events(tmp_path, monkeypatch)
     client = TestClient(app_main.app)
     response = client.post("/execute", json={"code": "1;"})
     assert response.status_code == 503
+    assert events() == [("start", None, None), ("end", 503, "busy")]
 
 
 def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
@@ -128,18 +171,45 @@ def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
         server.close()
         loop.close()
     assert body["truncated"] is True
-    assert "The output is too long and has been truncated." in body["warnings"]
+    assert body["error"] == "The output is too long and has been truncated."
+    assert body["warnings"] == []
 
 
-def test_firecracker_backend_rejects_code_too_large_once_escaped(tmp_path):
+def test_main_returns_413_for_code_too_large_once_escaped(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+
     settings = _settings(tmp_path)
+    code = "\x01" * settings.magma_input_bytes
+    assert len(protocol.encode({"code": code})) > protocol.MAX_REQUEST_BYTES
+    monkeypatch.setattr(app_main, "settings", settings)
+    events = _usage_events(tmp_path, monkeypatch)
+    response = TestClient(app_main.app).post("/execute", json={"code": code})
+    assert response.status_code == 413
+    assert response.json() == {"error": "Input too large"}
+    assert events() == [("start", None, None), ("end", 413, "too_large")]
 
-    async def run():
-        server, seen = await _fake_supervisor(settings.supervisor_socket, {"stdout": "", "stderr": "", "exit_code": 0})
-        result = await executor.execute_magma("\x01" * (protocol.MAX_REQUEST_BYTES // 6 + 1), settings)
-        server.close(); await server.wait_closed()
-        return result, seen
 
-    result, seen = asyncio.run(run())
-    assert result.exit_code == -1 and result.stderr == "input too large for the worker"
-    assert "request" not in seen
+@pytest.mark.parametrize("code", ["\x01" * 42_000, "1;"], ids=["over-code-limit", "small"])
+def test_main_returns_413_when_the_supervisor_rejects_the_code_size(tmp_path, monkeypatch, code):
+    import threading
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+
+    settings = _settings(tmp_path)
+    # Whatever reaches it, this supervisor answers as the real one does for oversized code.
+    reply = {"error": "bad_request", "stdout": "", "stderr": "code too large", "exit_code": -1, "timed_out": False, "truncated": False}
+    loop = asyncio.new_event_loop()
+    server = loop.run_until_complete(_fake_supervisor(settings.supervisor_socket, reply))[0]
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(app_main, "settings", settings)
+    try:
+        response = TestClient(app_main.app).post("/execute", json={"code": code})
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        server.close()
+        loop.close()
+    assert response.status_code == 413
+    assert response.json() == {"error": "Input too large"}

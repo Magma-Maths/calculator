@@ -13,6 +13,9 @@ import struct
 AGENT_PORT = 52
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_REPLY_BYTES = 1024 * 1024
+# Room the supervisor leaves for the environment and limits it adds to the guest request.
+GUEST_REQUEST_OVERHEAD = 16 * 1024
+CODE_TOO_LARGE = "code too large"
 
 _HEADER = struct.Struct(">I")
 
@@ -24,6 +27,11 @@ class FrameError(Exception):
 def encode(obj) -> bytes:
     """The frame body for obj; JSON escaping can make it several times the raw text."""
     return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
+def code_fits(code: str) -> bool:
+    """Whether the supervisor accepts code of this size; measured encoded, as escaping can grow it sixfold."""
+    return len(encode(code)) <= MAX_REQUEST_BYTES - GUEST_REQUEST_OVERHEAD
 
 
 def pack(obj: dict) -> bytes:
