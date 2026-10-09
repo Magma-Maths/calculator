@@ -20,12 +20,10 @@ from app.executor import (
     SupervisorUnavailable,
     execute_magma,
 )
-from app.magma_cmd import wrap_magma_code
 from app.parser import TRUNCATION_WARNING, parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
 from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
-from firecracker import protocol
 
 settings = Settings()
 rate_limiter = RateLimiter(
@@ -159,9 +157,8 @@ def _reject(status: int, reason: str, message: str, client_ip: str, input_size: 
         "status": status,
         "reason": reason,
     }))
-    # Metadata only, never code: these paths run before the rate limiter's
-    # own bookkeeping, so logging code here would let a client that only
-    # ever gets rejected grow the submission log without bound.
+    # Metadata only, never code: code is kept once a request reaches the
+    # executor; the local no-free-slot 503, 429, and the 50 KB 413 never do.
     submission_logger.log_rejected(uuid.uuid4().hex, client_ip, reason, input_size)
     return JSONResponse(status_code=status, content={"error": message}, headers=headers)
 
@@ -205,16 +202,7 @@ async def execute(req: ExecuteRequest, request: Request):
     }
     logger.info(json.dumps(arrival))
     usage_logger.log(arrival)
-
-    # Mirrors execute_via_supervisor()'s own size check: run here only to
-    # decide whether logging this request's code is safe, not to enforce
-    # the rejection (that happens there).
-    if settings.executor_backend == "firecracker" and not protocol.code_fits(
-        wrap_magma_code(req.code, settings.magma_timeout)
-    ):
-        submission_logger.log_rejected(request_id, client_ip, "too_large", len(req.code))
-    else:
-        submission_logger.log_arrival(request_id, client_ip, req.code)
+    submission_logger.log_arrival(request_id, client_ip, req.code)
     # Other requests already holding a slot when this one was admitted: a
     # cheap concurrency signal for the completion line below.
     in_flight = settings.max_concurrent - semaphore._value

@@ -359,16 +359,15 @@ def test_main_returns_413_for_code_too_large_once_escaped(tmp_path, monkeypatch)
 
     assert response.status_code == 413
     assert response.json() == {"error": "Input too large"}
-    # Admitted and counted exactly like any other request, same as before
-    # the submission log existed: one start, one end with the executor's
-    # own 413/too_large mapping. Only the submission log treats it
-    # specially, since the code was always going to be rejected.
+    # Admitted and counted exactly like any other request: one start, one
+    # end with the executor's own 413/too_large mapping. It is under the
+    # 50 KB input limit and already rate-limited, so, like any other
+    # admitted request, it keeps its code: a frame-limit probe is one of
+    # the things this log exists to catch.
     assert events() == [("start", None, None), ("end", 413, "too_large")]
     [arrival, completion] = submission_entries()
-    assert arrival["reason"] == "too_large"
-    assert "code" not in arrival
+    assert arrival["code"] == code
     assert completion["outcome"] == "too_large"
-    assert "code" not in completion
 
 
 @pytest.mark.parametrize("code", ["\x01" * 42_000, "1;"], ids=["over-code-limit", "small"])
