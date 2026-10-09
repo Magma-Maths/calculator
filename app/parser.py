@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field
 
-from app.executor import SECCOMP_KILLED
+from app.executor import SECCOMP_KILLED, TIMEOUT_STDERR_MARKERS
 
 
 @dataclass
@@ -101,15 +101,20 @@ def _extract_footer(text: str, result: ParseResult) -> None:
         result.memory = m.group(1)
 
 
-def parse_stderr_warnings(stderr: str | None) -> list[str]:
-    if not stderr:
-        return []
+def parse_stderr_warnings(
+    stderr: str | None, timed_out: bool = False, seccomp_killed: bool = False
+) -> list[str]:
+    """Checks timed_out/seccomp_killed independently of stderr text: the
+    Firecracker backend reports them as flags with no guaranteed matching
+    text, unlike nsjail's telltale stderr strings.
+    """
+    stderr = stderr or ""
     warnings = []
-    if "Alarm clock" in stderr or "Cputime limit exceeded" in stderr or "Killed" in stderr:
+    if timed_out or any(marker in stderr for marker in TIMEOUT_STDERR_MARKERS):
         warnings.append(
             "The computation exceeded the time limit and so was terminated prematurely."
         )
-    if stderr.startswith(SECCOMP_KILLED):
+    if seccomp_killed or stderr.startswith(SECCOMP_KILLED):
         warnings.append(
             f"Magma was {SECCOMP_KILLED}: it made a system call the sandbox does not allow."
         )

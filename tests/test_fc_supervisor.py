@@ -265,6 +265,33 @@ def test_run_job_passes_seccomp_fields_through(config):
     assert reply["seccomp_log"] == ["audit: type=1326 syscall=101"]
 
 
+def test_run_job_bounds_malicious_resource_numbers(config):
+    # The guest is untrusted input; an out-of-range value here would
+    # otherwise raise OverflowError on a later unit conversion (the huge
+    # int) or serialize as non-standard JSON (inf).
+    agent_reply = {
+        "stdout": "2\n", "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False,
+        "cpu_time_sec": 10**400, "peak_memory_kb": float("inf"),
+    }
+    host = FakeHost(config["jail_base"], agent_reply=agent_reply)
+    runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+    reply = asyncio.run(runner.run_job(_request()))
+    assert reply["cpu_time_sec"] is None
+    assert reply["peak_memory_kb"] is None
+
+
+def test_run_job_passes_valid_resource_numbers_through(config):
+    agent_reply = {
+        "stdout": "2\n", "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False,
+        "cpu_time_sec": 1.5, "peak_memory_kb": 20480,
+    }
+    host = FakeHost(config["jail_base"], agent_reply=agent_reply)
+    runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+    reply = asyncio.run(runner.run_job(_request()))
+    assert reply["cpu_time_sec"] == 1.5
+    assert reply["peak_memory_kb"] == 20480
+
+
 def test_guest_seccomp_reaches_boot_args(config, monkeypatch):
     config["guest_seccomp"] = "log"
     host = FakeHost(config["jail_base"])

@@ -464,6 +464,10 @@ class Runner:
             "seccomp_killed": bool(reply.get("seccomp_killed", False)),
             "seccomp_mode": str(reply.get("seccomp_mode", ""))[:16],
             "seccomp_log": [str(line)[:200] for line in log_lines[:20]],
+            # Untrusted guest input: bounded here, where it enters the host,
+            # not just re-checked defensively on the API side.
+            "cpu_time_sec": protocol.bounded_cpu_time_sec(reply.get("cpu_time_sec")),
+            "peak_memory_kb": protocol.bounded_memory_kb(reply.get("peak_memory_kb")),
         })
 
 

@@ -105,6 +105,7 @@ def _failure(message: str, mode: str) -> dict:
     return {
         "stdout": "", "stderr": message, "exit_code": -1, "timed_out": False, "truncated": False,
         "seccomp_killed": False, "seccomp_mode": mode, "seccomp_log": [],
+        "cpu_time_sec": None, "peak_memory_kb": None,
     }
 
 
@@ -181,6 +182,14 @@ def run_job(request: dict, run_as_uid: int | None = None, mode: str | None = Non
             proc.kill()
         proc.wait()
 
+    # The child is reaped by the proc.wait() calls above, and this agent
+    # runs exactly one job per process, so RUSAGE_CHILDREN is this job's
+    # usage alone: independent of stdout, unlike Magma's own footer, which
+    # output truncation or a kill can lose entirely.
+    rusage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu_time_sec = rusage.ru_utime + rusage.ru_stime
+    peak_memory_kb = rusage.ru_maxrss
+
     stdin_thread.join()
     for t in readers:
         t.join()
@@ -203,6 +212,8 @@ def run_job(request: dict, run_as_uid: int | None = None, mode: str | None = Non
         "seccomp_killed": seccomp_killed,
         "seccomp_mode": mode,
         "seccomp_log": _read_seccomp_log() if mode == "log" else [],
+        "cpu_time_sec": cpu_time_sec,
+        "peak_memory_kb": peak_memory_kb,
     })
 
 
