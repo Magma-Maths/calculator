@@ -260,8 +260,7 @@ async def _run(code: str, outcome: dict, submission_outcome: dict):
 
     # The footer is Magma's own report, lost whenever stdout is truncated or
     # the job is killed before printing it. The guest agent measures the
-    # Firecracker backend's job independently of stdout, so that reply is
-    # preferred when present; nsjail has only ever had the footer.
+    # job independently of stdout, so that reply is preferred when present.
     time_sec = result.cpu_time_sec if result.cpu_time_sec is not None else parsed.time_sec
     memory_mb = (
         round(result.peak_memory_kb / 1024, 3)
@@ -278,8 +277,8 @@ async def _run(code: str, outcome: dict, submission_outcome: dict):
         stdout_bytes=len(parsed.stdout.encode("utf-8")),
         stdout_truncated=parsed.truncated,
         # What the executor returned before the app's own output-size
-        # truncation. On the Firecracker backend this is already bounded by
-        # the guest's own output cap, so it is not the size before that cap.
+        # truncation. This is already bounded by the guest's own output cap,
+        # so it is not the size before that cap.
         stdout_bytes_raw=len(result.stdout.encode("utf-8")),
         stderr_bytes=len(result.stderr.encode("utf-8")),
     )

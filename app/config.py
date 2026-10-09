@@ -1,21 +1,12 @@
-from typing import Literal
-
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # Magma execution
-    magma_root: str = "/opt/magma/current"
     magma_timeout: int = 120
     magma_cpu_timeout: int = 120
-    magma_memory_mb: int = 400
     magma_input_kb: int = 50
     magma_output_kb: int = 20
-    jail_seccomp: bool = True
-
-    # No default: a worker whose environment omits it must not start on the
-    # in-container jail when the host was meant to run Firecracker.
-    executor_backend: Literal["nsjail", "firecracker"]
     supervisor_socket: str = "/run/magma-fc/supervisor.sock"
     # JSON written by the worker's host checks; /health/deep fails while it
     # lists problems. Empty skips it, as on hosts without those checks.

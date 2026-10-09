@@ -1,5 +1,4 @@
-# Mirrors nsjail.cfg's constant envar lines, so the firecracker guest sees
-# the same Magma environment as the nsjail sandbox.
+# The launcher script's constant exports; see magma_environment().
 MAGMA_CONSTANT_ENV: dict[str, str] = {
     "MAGMA_LIBRARIES": "c9lattices:examples:galpols:intro:isolgps:matgps:pergps:simgps:solgps",
     "MKL_SERIAL": "YES",
@@ -22,10 +21,9 @@ def wrap_magma_code(code: str, timeout: int) -> str:
 def magma_environment(magma_root: str) -> list[str]:
     """Root-dependent variables the magma launcher script exports for magma.exe.
 
-    The launcher (magma_root/magma) is a shell script and the jail mounts no
-    shell and no /usr/bin, so the binary is exec'd directly and gets these
-    from nsjail --env instead. The launcher's constant exports are in
-    nsjail.cfg.
+    The guest execs magma.exe directly rather than through the launcher
+    (magma_root/magma), a shell script, so it needs these set for it. The
+    launcher's constant exports are MAGMA_CONSTANT_ENV.
     """
     root = magma_root.rstrip("/")
     return [

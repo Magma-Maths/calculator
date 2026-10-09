@@ -1,18 +1,12 @@
 import asyncio
 import json
-import os
 import socket
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
 from app import executor
 from app.config import Settings
 from firecracker import protocol
-
-ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +52,7 @@ def _submission_log(tmp_path, monkeypatch):
 
 
 def _settings(tmp_path):
-    return Settings(executor_backend="firecracker", supervisor_socket=str(tmp_path / "sup.sock"), magma_timeout=7, magma_output_kb=1)
+    return Settings(supervisor_socket=str(tmp_path / "sup.sock"), magma_timeout=7, magma_output_kb=1)
 
 
 def test_firecracker_backend_success(tmp_path):
@@ -290,19 +284,6 @@ def test_main_returns_503_when_the_supervisor_is_unreachable(tmp_path, monkeypat
     assert response.status_code == 503
     assert response.json() == {"error": "Execution service unavailable"}
     assert events() == [("start", None, None), ("end", 503, "unavailable")]
-
-
-@pytest.mark.parametrize("backend", [None, "", "nsjial"])
-def test_service_refuses_to_start_without_a_known_backend(backend):
-    env = {k: v for k, v in os.environ.items() if k != "EXECUTOR_BACKEND"}
-    if backend is not None:
-        env["EXECUTOR_BACKEND"] = backend
-    proc = subprocess.run(
-        [sys.executable, "-c", "import app.main"],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode != 0
-    assert "executor_backend" in proc.stderr
 
 
 def test_main_returns_503_on_busy(tmp_path, monkeypatch):
