@@ -10,6 +10,7 @@ import grp
 import json
 import logging
 import os
+import signal
 import time
 
 from app.magma_cmd import MAGMA_CONSTANT_ENV, magma_environment
@@ -78,29 +79,48 @@ async def real_cgroup_populated(unit: str) -> bool:
         return True
 
 
+class _Vm:
+    """A booted guest whose agent has accepted the host's vsock connection."""
+
+    def __init__(self, started: float, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.started = started
+        self.reader = reader
+        self.writer = writer
+
+
+class _Next:
+    """A free slot's next guest; ready resolves to a _Vm, or None if its boot failed."""
+
+    def __init__(self):
+        self.ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.claimed = asyncio.Event()
+
+
 class Runner:
     def __init__(self, config: dict, systemctl=real_systemctl, cgroup_populated=real_cgroup_populated):
         self.config = config
         self.systemctl = systemctl
         self.cgroup_populated = cgroup_populated
         self.images = jail.Images(**config["images"])
-        self._free: asyncio.Queue | None = None
+        self._free: list[jail.Slot] | None = None
         self._slots = [jail.Slot(s["name"], s["mac"]) for s in config["slots"]]
         self._quarantined: list[str] = []
+        self._next: dict[str, _Next] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._threads: set[asyncio.Future] = set()
+        self._preboot = False
         # Fail fast on a bad slot MAC (jail.render_config raises ValueError)
         # instead of only discovering it mid-job when staging that slot.
         for slot in self._slots:
             jail.render_config(slot.mac, config["mem_mib"], config["vcpus"], config.get("guest_seccomp", "on"))
 
-    def _queue(self) -> asyncio.Queue:
+    def _free_list(self) -> list[jail.Slot]:
         if self._free is None:
-            self._free = asyncio.Queue()
-            for slot in self._slots:
-                self._free.put_nowait(slot)
+            self._free = list(self._slots)
         return self._free
 
     def free_slots(self) -> int:
-        return self._queue().qsize()
+        return len(self._free_list())
 
     def quarantined(self) -> list[str]:
         return list(self._quarantined)
@@ -120,22 +140,41 @@ class Runner:
             return protocol.CODE_TOO_LARGE
         return None
 
+    def _claim(self) -> tuple[jail.Slot, _Next | None] | None:
+        """Take a free slot, preferring one whose guest is ready, then one still booting."""
+        free = self._free_list()
+        if not free:
+            return None
+
+        def rank(slot: jail.Slot) -> int:
+            nxt = self._next.get(slot.name)
+            if nxt is None:
+                return 2
+            if not nxt.ready.done():
+                return 1
+            return 0 if nxt.ready.result() is not None else 2
+
+        slot = min(free, key=rank)
+        free.remove(slot)
+        nxt = self._next.pop(slot.name, None)
+        if nxt is not None:
+            nxt.claimed.set()
+        return slot, nxt
+
     async def run_job(self, request: dict) -> dict:
         problem = self._validate(request)
         if problem:
             reply = _error("bad_request", problem)
             self._log_outcome(None, reply)
             return reply
-        queue = self._queue()
-        try:
-            slot = queue.get_nowait()
-        except asyncio.QueueEmpty:
+        claimed = self._claim()
+        if claimed is None:
             reply = _error("busy", "no free worker slot")
             self._log_outcome(None, reply)
             return reply
-        unit = f"magma-fc@{slot.name}.service"
+        slot, nxt = claimed
         try:
-            reply = await self._run_on_slot(slot, unit, request)
+            reply = await self._run_on_slot(slot, nxt, request)
         except Exception:
             log.exception("job failed on %s", slot.name)
             reply = _error("worker_failed", "internal error")
@@ -146,7 +185,7 @@ class Runner:
                 log.exception("release failed for %s; quarantining", slot.name)
                 clean = False
             if clean:
-                queue.put_nowait(slot)
+                self._add_free(slot)
             else:
                 self._quarantined.append(slot.name)
         self._log_outcome(slot.name, reply)
@@ -178,7 +217,7 @@ class Runner:
                 return False
             await asyncio.sleep(0.2)
         try:
-            await asyncio.to_thread(jail.cleanup, self.config["jail_base"], slot.name)
+            await self._in_thread(jail.cleanup, self.config["jail_base"], slot.name)
         except OSError:
             log.exception("cleanup failed for %s; quarantining", slot.name)
             return False
@@ -202,16 +241,119 @@ class Runner:
                 clean.append(slot)
             else:
                 self._quarantined.append(slot.name)
-        self._free = asyncio.Queue()
-        for slot in clean:
-            self._free.put_nowait(slot)
+        self._free = clean
 
-    async def _run_on_slot(self, slot: jail.Slot, unit: str, request: dict) -> dict:
+    async def start(self) -> None:
+        """reset(), then boot every free slot's guest ahead of its first job."""
+        await self.reset()
+        self._preboot = True
+        for slot in self._free_list():
+            self._prepare(slot)
+
+    async def shutdown(self) -> None:
+        """Stop booting replacements and tear down every idle guest."""
+        self._preboot = False
+        for task in list(self._tasks):
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._threads:
+            await asyncio.wait(self._threads)
+        for slot in list(self._free_list()):
+            nxt = self._next.pop(slot.name, None)
+            if nxt is not None and nxt.ready.done() and nxt.ready.result() is not None:
+                nxt.ready.result().writer.close()
+            if not await self._release(slot):
+                self._free_list().remove(slot)
+                self._quarantined.append(slot.name)
+
+    async def _in_thread(self, fn, *args):
+        """Run fn in a thread that shutdown() waits for even if the caller was cancelled."""
+        fut = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        self._threads.add(fut)
+        fut.add_done_callback(self._thread_done)
+        return await asyncio.shield(fut)
+
+    def _thread_done(self, fut: asyncio.Future) -> None:
+        self._threads.discard(fut)
+        if not fut.cancelled():
+            fut.exception()  # retrieved here when the awaiting caller was cancelled
+
+    def _add_free(self, slot: jail.Slot) -> None:
+        self._free_list().append(slot)
+        if self._preboot:
+            self._prepare(slot)
+
+    def _prepare(self, slot: jail.Slot) -> None:
+        nxt = _Next()
+        self._next[slot.name] = nxt
+        task = asyncio.create_task(self._keep_warm(slot, nxt))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _idle_limit(self) -> float:
+        # RuntimeMaxSec counts idle time too, so a guest must be handed off
+        # early enough for the longest job to finish before systemd kills it.
         cfg = self.config
-        root = await asyncio.to_thread(
+        limit = cfg.get("runtime_max_sec", 150) - cfg.get("max_timeout", 300) - 5
+        return max(limit, cfg["boot_timeout"])
+
+    async def _keep_warm(self, slot: jail.Slot, nxt: _Next) -> None:
+        """Boot the free slot's next guest and replace it if it ages out unclaimed.
+
+        A job that claims the slot takes ownership, including releasing a
+        failed boot; until then this task owns it.
+        """
+        try:
+            while True:
+                try:
+                    vm = await self._boot(slot)
+                except Exception:
+                    log.exception("boot failed on %s", slot.name)
+                    vm = None
+                if not isinstance(vm, _Vm):
+                    if not nxt.claimed.is_set():
+                        await self._release_idle(slot)
+                    return
+                nxt.ready.set_result(vm)
+                age = time.monotonic() - vm.started
+                try:
+                    await asyncio.wait_for(nxt.claimed.wait(), self._idle_limit() - age)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                if nxt.claimed.is_set():
+                    return
+                nxt.ready = asyncio.get_running_loop().create_future()
+                vm.writer.close()
+                if not await self._release_idle(slot):
+                    return
+        finally:
+            if not nxt.ready.done():
+                nxt.ready.set_result(None)
+
+    async def _release_idle(self, slot: jail.Slot) -> bool:
+        """Release a free slot nobody has claimed; quarantine it if that fails."""
+        try:
+            clean = await self._release(slot)
+        except Exception:
+            log.exception("release failed for %s; quarantining", slot.name)
+            clean = False
+        if not clean and slot in self._free_list():
+            self._free_list().remove(slot)
+            self._next.pop(slot.name, None)
+            self._quarantined.append(slot.name)
+            log.info("idle %s quarantined (%d free, %d quarantined)", slot.name, self.free_slots(), len(self._quarantined))
+        return clean
+
+    async def _boot(self, slot: jail.Slot) -> _Vm | dict:
+        """Stage the slot, start its unit and connect to the guest agent; an error reply if that fails."""
+        cfg = self.config
+        unit = f"magma-fc@{slot.name}.service"
+        root = await self._in_thread(
             jail.stage, cfg["jail_base"], slot, self.images, cfg["mem_mib"], cfg["vcpus"], cfg["uid"], cfg["gid"],
             cfg.get("guest_seccomp", "on"),
         )
+        started = time.monotonic()
         rc, out = await self.systemctl(["start", unit])
         if rc != 0:
             log.error("start %s failed rc=%s: %s", unit, rc, out.strip())
@@ -224,6 +366,50 @@ class Runner:
         except vsock.VsockError as exc:
             log.error("vsock connect for %s failed: %s", unit, exc)
             return _error("worker_failed", "guest did not come up")
+        return _Vm(started, reader, writer)
+
+    def _usable(self, vm: _Vm, request: dict) -> bool:
+        age = time.monotonic() - vm.started
+        return not vm.reader.at_eof() and age + request["timeout"] + 5 < self.config.get("runtime_max_sec", 150)
+
+    @staticmethod
+    async def _wait_ready(nxt: _Next) -> _Vm | None:
+        """Await the slot's boot without letting a cancelled job cancel it.
+
+        On cancellation the boot still settles and its connection is closed
+        before run_job() releases the slot.
+        """
+        try:
+            await asyncio.wait([nxt.ready])
+        except asyncio.CancelledError:
+            await asyncio.wait([nxt.ready])
+            if isinstance(nxt.ready.result(), _Vm):
+                nxt.ready.result().writer.close()
+            raise
+        return nxt.ready.result()
+
+    async def _run_on_slot(self, slot: jail.Slot, nxt: _Next | None, request: dict) -> dict:
+        unit = f"magma-fc@{slot.name}.service"
+        # Retrying a boot the job already waited on could stack two boots and
+        # a release ahead of a full-length job, past the API's read deadline.
+        waited = nxt is not None and not nxt.ready.done()
+        vm = await self._wait_ready(nxt) if nxt is not None else None
+        if waited and (vm is None or not self._usable(vm, request)):
+            if vm is not None:
+                vm.writer.close()
+            return _error("worker_failed", "guest did not come up")
+        if nxt is not None and (vm is None or not self._usable(vm, request)):
+            # The job has not reached the guest yet, so one retry on a fresh boot is safe.
+            log.warning("next guest on %s is not usable; booting a fresh one", slot.name)
+            if vm is not None:
+                vm.writer.close()
+            if not await self._release(slot):
+                return _error("worker_failed", "guest did not come up")
+            vm = None
+        if vm is None:
+            vm = await self._boot(slot)
+            if not isinstance(vm, _Vm):
+                return vm
         guest_request = {
             "code": request["code"],
             "env": guest_environment(),
@@ -234,7 +420,7 @@ class Runner:
         }
         try:
             reply = await asyncio.wait_for(
-                self._exchange(reader, writer, guest_request), timeout=request["timeout"] + 5
+                self._exchange(vm.reader, vm.writer, guest_request), timeout=request["timeout"] + 5
             )
         except asyncio.TimeoutError:
             log.error("guest did not reply before the deadline on %s", slot.name)
@@ -246,7 +432,7 @@ class Runner:
             log.error("bad reply from guest on %s: %s", unit, exc)
             return _error("worker_failed", "bad reply from guest")
         finally:
-            writer.close()
+            vm.writer.close()
         return self._bound(reply, request["output_bytes"])
 
     @staticmethod
@@ -346,14 +532,19 @@ async def main() -> None:
         )
     os.makedirs(config["jail_base"], mode=0o750, exist_ok=True)
     runner = Runner(config)
-    await runner.reset()
+    await runner.start()
     server = await serve(runner, config["socket"], config.get("socket_group"))
     log.info(
         "listening on %s with %d free slots (%d quarantined)",
         config["socket"], runner.free_slots(), len(runner.quarantined()),
     )
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
     async with server:
-        await server.serve_forever()
+        await stop.wait()
+    await runner.shutdown()
 
 
 if __name__ == "__main__":

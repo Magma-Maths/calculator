@@ -34,8 +34,15 @@ def config(request):
 class FakeHost:
     """Fake systemctl + fake Firecracker vsock endpoint + fake agent."""
 
-    def __init__(self, base, agent_reply=None, boot=True, agent_delay=0.0, stop_leaves_cgroup=False, agent_frame=None):
+    def __init__(
+        self, base, agent_reply=None, boot=True, agent_delay=0.0, stop_leaves_cgroup=False, agent_frame=None,
+        boot_delay=0.0,
+    ):
         self.base = base
+        self.boot_delay = boot_delay
+        self.agents = {}
+        self.connected = []
+        self.served = []
         self.agent_frame = agent_frame
         self.calls = []
         self.agent_reply = agent_reply or {"stdout": "2\n", "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False}
@@ -55,7 +62,14 @@ class FakeHost:
             async def handle(reader, writer):
                 assert await reader.readline() == b"CONNECT 52\n"
                 writer.write(b"OK 1024\n"); await writer.drain()
-                self.seen_requests.append(await protocol.read_frame(reader, protocol.MAX_REQUEST_BYTES))
+                self.agents[slot] = writer
+                self.connected.append((time.monotonic(), slot))
+                generation = len(self.connected)
+                try:
+                    self.seen_requests.append(await protocol.read_frame(reader, protocol.MAX_REQUEST_BYTES))
+                except protocol.FrameError:
+                    return  # the host dropped an idle guest
+                self.served.append(generation)
                 await asyncio.sleep(self.agent_delay)
                 if self.agent_frame is not None:
                     writer.write(self.agent_frame); await writer.drain()
@@ -63,16 +77,28 @@ class FakeHost:
                     await protocol.write_frame(writer, self.agent_reply)
                 writer.close()
 
+            if self.boot_delay:
+                await asyncio.sleep(self.boot_delay)
             self.servers[slot] = await asyncio.start_unix_server(handle, path=path)
         if args[0] == "stop":
             slot = args[1].split("@", 1)[1].removesuffix(".service")
             srv = self.servers.pop(slot, None)
             if srv:
                 srv.close()
+            self.kill(slot)
         return 0, ""
 
     async def cgroup_populated(self, unit):
         return self.stop_leaves_cgroup
+
+    def kill(self, slot):
+        """The guest's Firecracker exits, closing its end of the vsock connection."""
+        agent = self.agents.pop(slot, None)
+        if agent:
+            agent.close()
+
+    def starts(self, slot):
+        return self.calls.count(["start", f"magma-fc@{slot}.service"])
 
 
 def _request(**over):
@@ -365,3 +391,292 @@ def test_reset_quarantines_a_slot_whose_release_raises(config):
     asyncio.run(runner.reset())
     assert runner.quarantined() == ["slot1"]
     assert runner.free_slots() == 1
+
+
+async def _until(cond, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "condition not reached"
+        await asyncio.sleep(0.02)
+
+
+def _pool_config(config):
+    config.update(max_timeout=10, runtime_max_sec=150)
+    return config
+
+
+def test_start_preboots_every_slot_and_shutdown_tears_them_down(config):
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 2)
+        assert runner.free_slots() == 2
+        await runner.shutdown()
+
+    asyncio.run(run())
+    for slot in ("slot1", "slot2"):
+        assert host.starts(slot) == 1
+        assert host.calls[-2:].count(["stop", f"magma-fc@{slot}.service"]) == 1
+        assert not os.path.exists(os.path.join(config["jail_base"], "firecracker", slot))
+    assert host.seen_requests == []
+
+
+def test_job_on_a_preboot_slot_does_not_wait_for_boot(config):
+    host = FakeHost(config["jail_base"], boot_delay=1.0)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 2)
+        t0 = time.monotonic()
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        await protocol.write_frame(writer, _request())
+        reply = await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
+        elapsed = time.monotonic() - t0
+        writer.close()
+        server.close()
+        await server.wait_closed()
+        await runner.shutdown()
+        return reply, t0, elapsed
+
+    reply, t0, elapsed = asyncio.run(run())
+    assert reply["stdout"] == "2\n"
+    assert all(when < t0 for when, _ in host.connected[:2])
+    assert elapsed < host.boot_delay / 2
+
+
+def test_replacement_boots_after_each_job(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 1)
+        first = await runner.run_job(_request(code="first;"))
+        await _until(lambda: len(host.connected) == 2)
+        second = await runner.run_job(_request(code="second;"))
+        await _until(lambda: len(host.connected) == 3)
+        assert runner.free_slots() == 1
+        await runner.shutdown()
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first["stdout"] == second["stdout"] == "2\n"
+    assert host.served == [1, 2]
+    assert [r["code"] for r in host.seen_requests] == ["first;", "second;"]
+    starts = [i for i, c in enumerate(host.calls) if c == ["start", "magma-fc@slot1.service"]]
+    assert len(starts) == 3
+    assert ["stop", "magma-fc@slot1.service"] in host.calls[starts[0]:starts[1]]
+
+
+def test_job_waits_for_a_slot_that_is_still_booting(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot_delay=0.5)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        reply = await runner.run_job(_request())
+        await runner.shutdown()
+        return reply
+
+    assert asyncio.run(run())["stdout"] == "2\n"
+    assert host.calls.index(["start", "magma-fc@slot1.service"]) == 1
+
+
+def test_dead_idle_guest_is_replaced_and_the_job_still_runs(config):
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 2)
+        host.kill("slot1")
+        host.kill("slot2")
+        await asyncio.sleep(0.1)
+        reply = await runner.run_job(_request())
+        await runner.shutdown()
+        return reply
+
+    reply = asyncio.run(run())
+    assert reply["stdout"] == "2\n"
+    assert len(host.seen_requests) == 1
+    assert max(host.starts(s) for s in ("slot1", "slot2")) >= 2
+
+
+def test_failed_preboot_is_retried_once_by_the_job(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot=False)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await asyncio.sleep(config["boot_timeout"] + 0.5)
+        assert host.starts("slot1") == 1
+        reply = await runner.run_job(_request())
+        starts_by_job = host.starts("slot1") - 1
+        await runner.shutdown()
+        return reply, starts_by_job, runner
+
+    reply, starts_by_job, runner = asyncio.run(run())
+    assert reply["error"] == "worker_failed"
+    assert starts_by_job == 1
+    assert runner.quarantined() == []
+
+
+def test_job_waiting_on_a_boot_that_fails_does_not_boot_again(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot=False)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        t0 = time.monotonic()
+        reply = await runner.run_job(_request())
+        elapsed = time.monotonic() - t0
+        starts_by_job = host.starts("slot1")
+        await runner.shutdown()
+        return reply, elapsed, starts_by_job
+
+    reply, elapsed, starts = asyncio.run(run())
+    assert reply["error"] == "worker_failed"
+    assert starts == 1
+    assert elapsed < config["boot_timeout"] + 1
+
+
+def test_failed_preboot_that_does_not_drain_quarantines_the_slot(config, monkeypatch, caplog):
+    monkeypatch.setattr(supervisor, "STOP_GRACE", 0.3)
+    host = FakeHost(config["jail_base"], boot=False)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        host.stop_leaves_cgroup = True
+        await _until(lambda: len(runner.quarantined()) == 2, timeout=config["boot_timeout"] + 3)
+        return await runner.run_job(_request()), runner
+
+    with caplog.at_level("INFO", logger="magma-fc"):
+        reply, runner = asyncio.run(run())
+    assert reply["error"] == "busy"
+    assert runner.free_slots() == 0
+    assert "(0 free, 2 quarantined)" in caplog.text
+
+
+def test_busy_only_when_every_slot_is_running_a_job(config):
+    host = FakeHost(config["jail_base"], agent_delay=0.5)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 2)
+        replies = await asyncio.gather(*(runner.run_job(_request()) for _ in range(3)))
+        await runner.shutdown()
+        return replies
+
+    errors = sorted(r.get("error", "ok") for r in asyncio.run(run()))
+    assert errors == ["busy", "ok", "ok"]
+
+
+def test_idle_guest_is_recycled_before_the_unit_runtime_limit(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        # 9 - 3 - 5 = 1 s of idle budget, floored at boot_timeout (2 s).
+        config.update(max_timeout=3, runtime_max_sec=9)
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await _until(lambda: len(host.connected) == 2, timeout=4)
+        reply = await runner.run_job(_request())
+        await runner.shutdown()
+        return reply
+
+    assert asyncio.run(run())["stdout"] == "2\n"
+    assert host.starts("slot1") >= 2
+    assert len(host.seen_requests) == 1
+
+
+def test_job_waiting_on_a_boot_whose_guest_is_unusable_does_not_boot_again(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot_delay=1.0)
+
+    async def run():
+        # The guest is 1 s old once ready, and 1 + 1 + 5 >= 7 leaves no room under RuntimeMaxSec.
+        config.update(max_timeout=1, runtime_max_sec=7)
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        reply = await runner.run_job(_request(timeout=1, cpu_timeout=1))
+        starts = host.starts("slot1")
+        await runner.shutdown()
+        return reply, starts
+
+    reply, starts = asyncio.run(run())
+    assert reply["error"] == "worker_failed"
+    assert starts == 1
+    assert host.seen_requests == []
+
+
+def test_cancelled_job_lets_the_boot_it_waited_on_settle(config):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot_delay=0.5)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        job = asyncio.create_task(runner.run_job(_request()))
+        await asyncio.sleep(0.1)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        connected_at_release = len(host.connected)
+        await _until(lambda: len(host.connected) == 2)
+        reply = await runner.run_job(_request())
+        await runner.shutdown()
+        return connected_at_release, reply
+
+    connected_at_release, reply = asyncio.run(run())
+    assert connected_at_release == 1
+    assert reply["stdout"] == "2\n"
+    assert host.served == [2]
+
+
+def test_shutdown_waits_for_staging_in_flight(config, monkeypatch):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"])
+    real_stage = jail.stage
+
+    def slow_stage(*args):
+        time.sleep(0.5)
+        return real_stage(*args)
+
+    monkeypatch.setattr(jail, "stage", slow_stage)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.shutdown()
+        await asyncio.sleep(0.7)
+
+    asyncio.run(run())
+    assert not os.path.exists(os.path.join(config["jail_base"], "firecracker", "slot1"))
+
+
+def test_idle_quarantine_logs_the_counts(config, monkeypatch, caplog):
+    monkeypatch.setattr(supervisor, "STOP_GRACE", 0.3)
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot=False)
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        await runner.start()
+        host.stop_leaves_cgroup = True
+        await _until(lambda: runner.quarantined() == ["slot1"], timeout=config["boot_timeout"] + 3)
+
+    with caplog.at_level("INFO", logger="magma-fc"):
+        asyncio.run(run())
+    assert "idle slot1 quarantined (0 free, 1 quarantined)" in caplog.text
