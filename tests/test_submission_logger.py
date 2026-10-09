@@ -72,6 +72,33 @@ def test_file_mode_is_0600(tmp_path):
     assert mode == 0o600
 
 
+def test_writes_to_file_left_by_logrotate(tmp_path):
+    # logrotate's `create 0600` directive leaves the fresh file at this
+    # mode before the process ever opens it; the write path must not
+    # depend on being the one to set that mode.
+    path = tmp_path / "submissions.jsonl"
+    path.touch(mode=0o600)
+
+    sl = SubmissionLogger(str(path))
+    sl.log_arrival("r1", "1.2.3.4", "print 1+1;")
+
+    [entry] = _entries(path)
+    assert entry["request_id"] == "r1"
+
+
+def test_new_file_is_0600_under_permissive_umask(tmp_path):
+    path = tmp_path / "submissions.jsonl"
+    old_umask = os.umask(0)
+    try:
+        sl = SubmissionLogger(str(path))
+        sl.log_arrival("r1", "1.2.3.4", "print 1+1;")
+    finally:
+        os.umask(old_umask)
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+
+
 def test_empty_path_disables_logging(tmp_path):
     sl = SubmissionLogger("")
     sl.log_arrival("r1", "1.2.3.4", "print 1+1;")

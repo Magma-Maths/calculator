@@ -42,12 +42,13 @@ class SubmissionLogger:
             try:
                 # Open-append-close per line: no handle held across
                 # requests, so logrotate can rename this file without
-                # copytruncate.
+                # copytruncate. Mode 0o600 on O_CREAT can only be
+                # narrowed by umask, never widened, and an existing file
+                # keeps the mode logrotate's `create 0600` already gave it.
                 fd = os.open(
                     str(self._path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
                 )
                 try:
-                    os.fchmod(fd, 0o600)  # enforce regardless of umask
                     os.write(fd, line.encode("utf-8"))
                 finally:
                     os.close(fd)
