@@ -198,7 +198,18 @@ def run_job(request: dict, run_as_uid: int | None = None, mode: str | None = Non
     seccomp_killed = False
     if exit_code < 0:
         exit_code = -1
-        if timed_out or proc.returncode in (-signal.SIGXCPU, -signal.SIGKILL):
+        # SIGKILL alone is ambiguous: the kernel also sends it for the
+        # RLIMIT_CPU hard limit (cpu + 1, once the soft limit at cpu seconds
+        # has already fired) and the guest's own OOM killer uses it too, with
+        # nothing to tell them apart except how much CPU time was actually
+        # used. Only the first is a timeout; an OOM kill falls through
+        # unlabeled, as "Execution failed (exit code -1)", same as before
+        # this agent measured anything.
+        if (
+            timed_out
+            or proc.returncode in (-signal.SIGXCPU, -signal.SIGALRM)
+            or (proc.returncode == -signal.SIGKILL and cpu_time_sec >= cpu)
+        ):
             timed_out = True
         elif proc.returncode == -signal.SIGSYS:
             seccomp_killed = True
