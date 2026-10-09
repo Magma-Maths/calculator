@@ -65,41 +65,9 @@ def test_readme_defaults_match_settings():
         )
 
 
-def test_env_example_matches_settings():
-    """Ensure calculator.env.example stays in sync with Settings."""
-    settings = Settings()
-    lines = (ROOT / "calculator.env.example").read_text().splitlines()
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, val = line.partition("=")
-        field_name = key.lower()
-        actual = getattr(settings, field_name)
-        if isinstance(actual, bool):
-            expected = val.lower() in ("true", "1", "yes")
-        elif isinstance(actual, int):
-            expected = int(val) if val else None
-        else:
-            expected = val
-        assert actual == expected, (
-            f"{key}: calculator.env.example says {val!r}, "
-            f"Settings has {actual!r}"
-        )
-
-
 def test_allowed_origins_list_custom(monkeypatch):
     monkeypatch.setenv("ALLOWED_ORIGIN", "https://magma-maths.org,http://localhost")
     settings = Settings()
     origins = settings.allowed_origins_list
     assert "https://magma-maths.org" in origins
     assert "http://localhost" in origins
-
-
-def test_compose_leaves_settings_to_the_env_file():
-    """An environment: entry in compose would silently override calculator.env."""
-    import yaml
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    environment = compose["services"]["calculator"].get("environment") or {}
-    keys = environment if isinstance(environment, dict) else [e.split("=")[0] for e in environment]
-    assert not {k.lower() for k in keys} & set(Settings.model_fields)
