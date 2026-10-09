@@ -32,10 +32,6 @@ class Settings(BaseSettings):
     # Submission logging (full code, for abuse investigation). Off unless set.
     submission_log_file: str = ""
 
-    # Optional Turnstile
-    turnstile_enabled: bool = False
-    turnstile_secret_key: str = ""
-
     @property
     def allowed_origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origin.split(",")]
