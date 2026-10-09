@@ -1,9 +1,8 @@
 # Firecracker worker
 
-Operator notes for the Firecracker backend: an alternative to the in-container
-nsjail sandbox that runs each `/execute` job in its own freshly booted microVM.
-Code lives under `firecracker/`; the API opts in with `EXECUTOR_BACKEND=firecracker`
-(see `calculator.env.example`).
+Operator notes for the Firecracker worker, which runs each `/execute` job in
+its own freshly booted microVM. Code lives under `firecracker/`; the API
+reaches it through `SUPERVISOR_SOCKET`.
 
 ## 1. What runs where
 
@@ -56,9 +55,7 @@ retried; the next job on that slot waits for its release, then boots on
 demand. Idle guests hold their memory. Stopping the supervisor waits for
 any staging or cleanup still running, then tears the idle guests down.
 
-With `EXECUTOR_BACKEND=firecracker`, the API container runs as the image's
-`calculator` user, since it no longer needs root for nsjail's namespace
-setup; under the nsjail backend it still runs as root.
+The API container runs as the image's unprivileged `calculator` user.
 
 ## 2. Host layout
 

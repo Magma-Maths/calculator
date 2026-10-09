@@ -1,6 +1,6 @@
 # Magma Calculator Service
 
-REST API backend for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Executes Magma code inside an [nsjail](https://github.com/google/nsjail) sandbox and returns structured JSON results.
+REST API backend for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Runs each Magma job in its own [Firecracker](https://firecracker-microvm.github.io/) microVM, through a supervisor on the host, and returns structured JSON results.
 
 ## Protocol
 
@@ -114,7 +114,7 @@ By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). T
 
 ### Prerequisites
 
-- **Docker** with support for `--cap-add SYS_ADMIN` (required for nsjail namespace creation)
+- **Docker**
 - **Magma** installed on the host (default: `/opt/magma`)
 
 ### 1. Get the image
@@ -127,7 +127,7 @@ Always run an exact tag: `sha-<short>` tags are immutable and `v*` tags are rele
 docker pull ghcr.io/magma-maths/calculator:v0.1.0
 ```
 
-To build from source instead (the multi-stage Dockerfile compiles nsjail and installs the Python dependencies via Poetry), give the local build a tag of its own and use it in place of `v0.1.0` in the recipes below:
+To build from source instead (the Dockerfile installs the Python dependencies via Poetry), give the local build a tag of its own and use it in place of `v0.1.0` in the recipes below:
 
 ```bash
 docker build -t ghcr.io/magma-maths/calculator:dev .
@@ -143,13 +143,11 @@ Edit `calculator.env`. Key settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAGMA_ROOT` | `/opt/magma/current` | Magma version tree holding `magma.exe` and `magmapassfile`; must be under `/opt/magma` (the bind mount) |
 | `MAGMA_TIMEOUT` | 120 | Wall-clock timeout (seconds) |
 | `MAGMA_CPU_TIMEOUT` | 120 | CPU time limit (seconds) |
-| `MAGMA_MEMORY_MB` | 400 | Memory limit (MB) |
 | `MAGMA_INPUT_KB` | 50 | Max input size (KB) |
 | `MAGMA_OUTPUT_KB` | 20 | Max output size (KB) |
-| `JAIL_SECCOMP` | True | Load the seccomp policy `security/seccomp/magma.kafel` into the jail |
+| `SUPERVISOR_SOCKET` | `/run/magma-fc/supervisor.sock` | UNIX socket of the Firecracker supervisor that runs each job |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
 | `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is Traefik's in `traefik/docker-compose.yml` |
@@ -157,8 +155,6 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
-
-`EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
 
 ### 3a. Start Traefik (once per host)
 
@@ -196,10 +192,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 ```bash
 docker run --rm \
-  --cap-add SYS_ADMIN \
-  --tmpfs /tmp:size=128m \
-  -v /opt/magma:/opt/magma:ro \
-  -e EXECUTOR_BACKEND=nsjail \
+  -v /run/magma-fc:/run/magma-fc \
   -p 8080:8080 \
   ghcr.io/magma-maths/calculator:v0.1.0
 ```
@@ -212,9 +205,7 @@ Start a second container with different limits for long-running computations:
 
 ```bash
 docker run --rm \
-  --cap-add SYS_ADMIN \
-  --tmpfs /tmp:size=128m \
-  -v /opt/magma:/opt/magma:ro \
+  -v /run/magma-fc:/run/magma-fc \
   --env-file calculator-long.env \
   -p 8081:8080 \
   ghcr.io/magma-maths/calculator:v0.1.0
@@ -222,23 +213,9 @@ docker run --rm \
 
 ## Security
 
-Each Magma process runs inside an nsjail sandbox with:
+Each job runs in its own freshly booted Firecracker microVM, started by a root supervisor on the host. The API container only ever talks to the supervisor's UNIX socket (`SUPERVISOR_SOCKET`) and never runs Magma itself. Inside the guest, Magma runs with the `-w` flag, a restricted mode that disables `System()`, `Pipe()`, `Open()` and other dangerous intrinsics, under the seccomp allow-list in `firecracker/guest/seccomp_policy.py`. A job that filter kills returns `exit_code` -1 and an error saying it made a system call the sandbox does not allow.
 
-- **PID, mount, network, and UTS namespace isolation**: the process cannot see or interact with the host
-- **No network access**: `clone_newnet` creates an empty network namespace
-- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
-- **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
-- **cgroup limits**: memory and CPU enforced at the kernel level
-- **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
-- **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
-- **Seccomp policy**: `security/seccomp/magma.kafel` allows only the system calls Magma was measured to use, plus a glibc baseline; any other call kills the process
-
-The executor passes the policy to nsjail while `JAIL_SECCOMP` is true, the default. A job killed by the policy returns `exit_code` -1, and its stderr starts with `killed by seccomp policy`.
-If that happens to legitimate code, rerun it with `JAIL_SECCOMP=false` to confirm the policy is the cause.
-Then find the missing call by running the same input under `strace -f` on the host, and add it to the policy.
-Turn the switch back on afterwards: it is a diagnostic, not a setting to leave off.
-
-An alternate backend runs each job inside its own Firecracker microVM instead of nsjail, for hosts that need per-request kernel isolation. Set `EXECUTOR_BACKEND=firecracker` and `SUPERVISOR_SOCKET` to the host's supervisor socket; see [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+See [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
 
 ### Submission log
 

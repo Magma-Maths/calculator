@@ -26,12 +26,7 @@ REQUEST_KEYS = {"code": str, "timeout": int, "cpu_timeout": int, "output_bytes":
 
 
 def guest_environment(root: str = GUEST_MAGMA_ROOT) -> dict:
-    """The guest's Magma environment: parity with nsjail.cfg plus --env.
-
-    Root-dependent variables come from the same magma_environment() helper
-    the nsjail path uses; MAGMA_CONSTANT_ENV mirrors nsjail.cfg's constant
-    envar lines, so both backends run Magma under the same environment.
-    """
+    """The variables the Magma launcher script would export, plus a minimal PATH, HOME and TMPDIR."""
     env = {name: value for name, _, value in (item.partition("=") for item in magma_environment(root))}
     env.update(MAGMA_CONSTANT_ENV)
     env["PATH"] = "/usr/bin:/bin"
