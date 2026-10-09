@@ -94,6 +94,8 @@ class _Next:
     def __init__(self):
         self.ready: asyncio.Future = asyncio.get_running_loop().create_future()
         self.claimed = asyncio.Event()
+        # Set once the boot has failed, while its release may still be running.
+        self.failed = False
 
 
 class Runner:
@@ -148,7 +150,7 @@ class Runner:
 
         def rank(slot: jail.Slot) -> int:
             nxt = self._next.get(slot.name)
-            if nxt is None:
+            if nxt is None or nxt.failed:
                 return 2
             if not nxt.ready.done():
                 return 1
@@ -311,6 +313,7 @@ class Runner:
                     log.exception("boot failed on %s", slot.name)
                     vm = None
                 if not isinstance(vm, _Vm):
+                    nxt.failed = True
                     if not nxt.claimed.is_set():
                         await self._release_idle(slot)
                     return
@@ -392,7 +395,7 @@ class Runner:
         unit = f"magma-fc@{slot.name}.service"
         # Retrying a boot the job already waited on could stack two boots and
         # a release ahead of a full-length job, past the API's read deadline.
-        waited = nxt is not None and not nxt.ready.done()
+        waited = nxt is not None and not nxt.ready.done() and not nxt.failed
         vm = await self._wait_ready(nxt) if nxt is not None else None
         if waited and (vm is None or not self._usable(vm, request)):
             if vm is not None:

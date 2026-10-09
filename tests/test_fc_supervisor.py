@@ -707,3 +707,42 @@ def test_idle_quarantine_logs_the_counts(config, monkeypatch, caplog):
     with caplog.at_level("INFO", logger="magma-fc"):
         asyncio.run(run())
     assert "idle slot1 quarantined (0 free, 1 quarantined)" in caplog.text
+
+
+def test_job_claiming_a_slot_while_its_failed_preboot_drains_boots_fresh(config, monkeypatch):
+    config["slots"] = config["slots"][:1]
+    host = FakeHost(config["jail_base"], boot=False, agent_delay=0.5)
+    drained_at = [0.0]
+
+    async def cgroup_populated(unit):
+        return time.monotonic() < drained_at[0]
+
+    cleanups = []
+    real_cleanup = jail.cleanup
+
+    def cleanup(*args):
+        cleanups.append(len(host.calls))
+        real_cleanup(*args)
+
+    monkeypatch.setattr(jail, "cleanup", cleanup)
+    stop = ["stop", "magma-fc@slot1.service"]
+
+    async def run():
+        runner = supervisor.Runner(_pool_config(config), systemctl=host.systemctl, cgroup_populated=cgroup_populated)
+        await runner.start()
+        drained_at[0] = float("inf")
+        await _until(lambda: host.calls.count(stop) == 2, timeout=config["boot_timeout"] + 2)
+        # The idle release polls the cgroup every 0.2 s from here; a job
+        # claiming 0.1 s in polls between those, and the cgroup drains at 0.25 s.
+        drained_at[0] = time.monotonic() + 0.25
+        host.boot = True
+        await asyncio.sleep(0.1)
+        reply = await runner.run_job(_request())
+        await runner.shutdown()
+        return reply
+
+    reply = asyncio.run(run())
+    assert reply["stdout"] == "2\n"
+    job_start = host.calls.index(["start", "magma-fc@slot1.service"], 2)
+    job_stop = host.calls.index(stop, job_start)
+    assert not [c for c in cleanups if job_start < c <= job_stop], "a cleanup ran under the job's guest"
