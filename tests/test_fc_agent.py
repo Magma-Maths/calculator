@@ -79,6 +79,14 @@ def test_run_job_success(fake_magma):
     assert reply["seccomp_log"] == []
 
 
+def test_run_job_reports_cpu_time_and_memory(fake_magma):
+    # Measured via RUSAGE_CHILDREN, independent of anything the child wrote
+    # to stdout, so this does not depend on Magma's own footer at all.
+    reply = agent.run_job(_req(fake_magma, "print 1+1;"))
+    assert reply["cpu_time_sec"] >= 0
+    assert reply["peak_memory_kb"] > 0
+
+
 def test_run_job_nonzero_exit_and_stderr(fake_magma):
     reply = agent.run_job(_req(fake_magma, "FAIL"))
     assert reply["exit_code"] == 3

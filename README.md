@@ -157,6 +157,7 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
+| `SUBMISSION_LOG_FILE` | `/data/submissions.jsonl` | Path for the submission log (JSON lines, holds code); empty disables it |
 
 `EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
 
@@ -239,6 +240,16 @@ Then find the missing call by running the same input under `strace -f` on the ho
 Turn the switch back on afterwards: it is a diagnostic, not a setting to leave off.
 
 An alternate backend runs each job inside its own Firecracker microVM instead of nsjail, for hosts that need per-request kernel isolation. Set `EXECUTOR_BACKEND=firecracker` and `SUPERVISOR_SOCKET` to the host's supervisor socket; see [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+
+### Submission log
+
+Separately from the usage log, every admitted `/execute` request's code is written to `SUBMISSION_LOG_FILE` (default `/data/submissions.jsonl`, mode 0600) at arrival, before execution, along with the client IP. A completion line with the same `request_id` follows with the outcome: `exit_code`, `timed_out`, `seccomp_killed`, elapsed time, CPU time and memory (from the Firecracker guest's own measurement when available, else Magma's stdout footer), stdout and stderr size, and how many other requests were already running when this one was admitted.
+
+A request turned away before admission (413 input too large; 429 rate limited; or 503 with no free local execution slot) logs metadata only: client IP, reason, and input size, no code, and gets no completion line. These paths precede the rate limiter's own bookkeeping, so a client that only ever gets rejected could otherwise grow this file without bound. A request admitted but then turned away by the Firecracker supervisor itself (busy or unavailable) was already counted by the rate limiter and keeps its code; only its completion line's `outcome` records why it did not run. The Firecracker worker frame's own size ceiling is narrower still: an admitted request that will not fit it is counted in `/stats` exactly like any other (`/execute`'s usage accounting is unchanged), but the submission log withholds its code and logs metadata only, since the rejection is already certain.
+
+Every admitted request gets exactly one completion line, including one the executor fails in a way this service does not specifically recognize; that line's `outcome` is `"error"` and the request is still counted as a failure in `/stats`, the same way an unrecognized exception already was before this file existed.
+
+A write error here is treated as transient and does not stop later writes. Only a startup failure, no path configured or its directory cannot be created, disables the log for the life of the process. This file exists only for investigating attempts to compromise the host; nothing in the service reads it back, and it never leaves the machine. The host rotates it daily and deletes it after 90 days (see the infrastructure repo).
 
 ## Development
 
