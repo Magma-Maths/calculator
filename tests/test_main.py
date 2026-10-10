@@ -237,41 +237,6 @@ def test_rate_limited_cors_response_exposes_retry_after(client, monkeypatch):
     assert resp.headers["access-control-expose-headers"] == "Retry-After"
 
 
-@pytest.fixture
-def production_cors(monkeypatch):
-    """ALLOWED_ORIGIN=https://magma-maths.org,http://localhost, as README documents
-    for a restricted deployment: one fixed origin plus the localhost regex, no "*".
-    """
-    from app import main
-    monkeypatch.setattr(main, "_allow_all_origins", False)
-    monkeypatch.setattr(main, "_fixed_origins", ["https://magma-maths.org"])
-    monkeypatch.setattr(main, "_allow_localhost", True)
-
-
-def test_restricted_origin_gets_allow_origin_and_exposed_retry_after(client, production_cors, monkeypatch):
-    from app import main
-    from app.ratelimit import RateLimiter
-    monkeypatch.setattr(main, "rate_limiter", RateLimiter(per_minute=0, per_hour=0))
-    resp = client.post(
-        "/execute", json={"code": "1;"}, headers={"Origin": "https://magma-maths.org"},
-    )
-    assert resp.status_code == 429
-    assert resp.headers["access-control-allow-origin"] == "https://magma-maths.org"
-    assert resp.headers["vary"] == "Origin"
-    assert resp.headers["access-control-expose-headers"] == "Retry-After"
-
-
-def test_restricted_preflight_refuses_a_foreign_origin(client, production_cors):
-    resp = client.options(
-        "/execute",
-        headers={
-            "Origin": "https://evil.example",
-            "Access-Control-Request-Method": "POST",
-        },
-    )
-    assert resp.status_code == 403
-
-
 def test_requests_turned_away_before_admission_are_logged(client, monkeypatch, caplog, usage_log):
     from app import main
     from app.ratelimit import RateLimiter
@@ -300,38 +265,53 @@ def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_l
     assert data["warnings"] == []
 
 
+def _start_server(tmp_path, **env):
+    """Start `python -m app.main` on a free port with the given env on top of
+    EXECUTOR_BACKEND=firecracker and an absent supervisor socket, so /execute
+    reaches the real middleware and settings wiring without needing Magma.
+
+    Settings are read once at process startup, so any test of
+    settings-dependent behaviour (CORS, rate-limit trust) needs its own
+    server rather than monkeypatching the importing test process.
+    Returns (process, base_url); the caller must terminate the process.
+    """
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    full_env = dict(
+        os.environ,
+        EXECUTOR_BACKEND="firecracker",
+        SUPERVISOR_SOCKET=str(tmp_path / "absent.sock"),
+        PORT=str(port),
+        USAGE_LOG_FILE=str(tmp_path / "usage.jsonl"),
+        **env,
+    )
+    server = subprocess.Popen(
+        [sys.executable, "-m", "app.main"], cwd=ROOT, env=full_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    url = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            httpx.get(f"{url}/health")
+            break
+        except httpx.TransportError:
+            assert server.poll() is None and time.monotonic() < deadline
+            time.sleep(0.1)
+    return server, url
+
+
 def _rate_limit_statuses(tmp_path, forwarded_allow_ips, forwarded_for):
     """Statuses from `python -m app.main` for one POST per X-Forwarded-For value.
 
     Each request arrives from 127.0.0.1 and the limit is one per minute, so a
     429 means the request was counted against an earlier one's client.
     """
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    env = dict(
-        os.environ,
-        EXECUTOR_BACKEND="firecracker",
-        SUPERVISOR_SOCKET=str(tmp_path / "absent.sock"),
-        PORT=str(port),
-        RATE_LIMIT_PER_MINUTE="1",
-        USAGE_LOG_FILE=str(tmp_path / "usage.jsonl"),
-        FORWARDED_ALLOW_IPS=forwarded_allow_ips,
-    )
-    server = subprocess.Popen(
-        [sys.executable, "-m", "app.main"], cwd=ROOT, env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    server, url = _start_server(
+        tmp_path, RATE_LIMIT_PER_MINUTE="1", FORWARDED_ALLOW_IPS=forwarded_allow_ips,
     )
     try:
-        url = f"http://127.0.0.1:{port}"
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                httpx.get(f"{url}/health")
-                break
-            except httpx.TransportError:
-                assert server.poll() is None and time.monotonic() < deadline
-                time.sleep(0.1)
         return [
             httpx.post(f"{url}/execute", json={"code": "1;"},
                        headers={"X-Forwarded-For": xff}).status_code
@@ -351,6 +331,44 @@ def test_clients_behind_a_trusted_proxy_get_separate_rate_limits(tmp_path):
 def test_forwarded_for_from_an_untrusted_peer_is_ignored(tmp_path):
     statuses = _rate_limit_statuses(tmp_path, "192.0.2.1", ["198.51.100.1", "198.51.100.2"])
     assert [s == 429 for s in statuses] == [False, True]
+
+
+# ALLOWED_ORIGIN is read once at process startup, so a restricted-origin test
+# cannot monkeypatch main's module state; it needs its own server process. As
+# documented for a restricted deployment: one fixed origin plus the localhost
+# regex, no "*".
+_PRODUCTION_ALLOWED_ORIGIN = "https://magma-maths.org,http://localhost"
+
+
+def test_restricted_origin_gets_allow_origin_and_exposed_retry_after(tmp_path):
+    server, url = _start_server(tmp_path, ALLOWED_ORIGIN=_PRODUCTION_ALLOWED_ORIGIN)
+    try:
+        resp = httpx.post(
+            f"{url}/execute", json={"code": "1;"},
+            headers={"Origin": "https://magma-maths.org"},
+        )
+        assert resp.headers["access-control-allow-origin"] == "https://magma-maths.org"
+        assert resp.headers["vary"] == "Origin"
+        assert resp.headers["access-control-expose-headers"] == "Retry-After"
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def test_restricted_preflight_refuses_a_foreign_origin(tmp_path):
+    server, url = _start_server(tmp_path, ALLOWED_ORIGIN=_PRODUCTION_ALLOWED_ORIGIN)
+    try:
+        resp = httpx.options(
+            f"{url}/execute",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert resp.status_code == 403
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
 
 
 @pytest.fixture
