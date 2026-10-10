@@ -404,6 +404,42 @@ def test_submission_logs_resource_stats(mock_exec, client, submission_log):
     assert completion["in_flight_at_admission"] == 0
 
 
+def test_in_flight_at_admission_counts_other_running_requests(client, submission_log):
+    """A request admitted while another is still executing sees that other
+    request in its in_flight_at_admission count; the other request sees none.
+    """
+    import threading
+    first_running = threading.Event()
+    release_first = threading.Event()
+
+    async def exec_side_effect(code, settings):
+        if code == "first":
+            first_running.set()
+            await asyncio.to_thread(release_first.wait)
+        return ExecutionResult(stdout=MOCK_MAGMA_STDOUT, stderr="", exit_code=0)
+
+    with patch("app.main.execute_magma", side_effect=exec_side_effect):
+        first_thread = threading.Thread(
+            target=lambda: client.post("/execute", json={"code": "first"})
+        )
+        first_thread.start()
+        assert first_running.wait(timeout=5)
+
+        resp = client.post("/execute", json={"code": "second"})
+        assert resp.status_code == 200
+
+        release_first.set()
+        first_thread.join(timeout=5)
+
+    entries = _entries(submission_log)
+    request_id_by_code = {e["request_id"]: e["code"] for e in entries if "code" in e}
+    in_flight_by_code = {
+        request_id_by_code[e["request_id"]]: e["in_flight_at_admission"]
+        for e in entries if "in_flight_at_admission" in e
+    }
+    assert in_flight_by_code == {"first": 0, "second": 1}
+
+
 def test_submission_too_large_logs_metadata_only(client, submission_log):
     big_code = "x" * (50 * 1024 + 1)
     resp = client.post("/execute", json={"code": big_code})
