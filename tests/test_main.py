@@ -237,6 +237,41 @@ def test_rate_limited_cors_response_exposes_retry_after(client, monkeypatch):
     assert resp.headers["access-control-expose-headers"] == "Retry-After"
 
 
+@pytest.fixture
+def production_cors(monkeypatch):
+    """ALLOWED_ORIGIN=https://magma-maths.org,http://localhost, as README documents
+    for a restricted deployment: one fixed origin plus the localhost regex, no "*".
+    """
+    from app import main
+    monkeypatch.setattr(main, "_allow_all_origins", False)
+    monkeypatch.setattr(main, "_fixed_origins", ["https://magma-maths.org"])
+    monkeypatch.setattr(main, "_allow_localhost", True)
+
+
+def test_restricted_origin_gets_allow_origin_and_exposed_retry_after(client, production_cors, monkeypatch):
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(per_minute=0, per_hour=0))
+    resp = client.post(
+        "/execute", json={"code": "1;"}, headers={"Origin": "https://magma-maths.org"},
+    )
+    assert resp.status_code == 429
+    assert resp.headers["access-control-allow-origin"] == "https://magma-maths.org"
+    assert resp.headers["vary"] == "Origin"
+    assert resp.headers["access-control-expose-headers"] == "Retry-After"
+
+
+def test_restricted_preflight_refuses_a_foreign_origin(client, production_cors):
+    resp = client.options(
+        "/execute",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert resp.status_code == 403
+
+
 def test_requests_turned_away_before_admission_are_logged(client, monkeypatch, caplog, usage_log):
     from app import main
     from app.ratelimit import RateLimiter
