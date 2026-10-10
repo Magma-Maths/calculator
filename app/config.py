@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     # Usage logging
     usage_log_file: str = "/data/usage.jsonl"
 
-    # Submission logging (full code, for abuse investigation). Empty disables.
-    submission_log_file: str = "/data/submissions.jsonl"
+    # Submission logging (full code, for abuse investigation). Off unless set.
+    submission_log_file: str = ""
 
     # Optional Turnstile
     turnstile_enabled: bool = False

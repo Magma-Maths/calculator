@@ -21,6 +21,7 @@ def test_default_settings():
     assert settings.allowed_origin == "*"
     assert settings.turnstile_enabled is False
     assert settings.turnstile_secret_key == ""
+    assert settings.submission_log_file == ""
 
 
 def test_settings_from_env(monkeypatch):
