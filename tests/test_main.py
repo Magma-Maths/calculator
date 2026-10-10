@@ -210,7 +210,9 @@ def test_cors_preflight_allows_any_origin(client):
         },
     )
     assert resp.status_code == 200
-    assert resp.headers.get("access-control-allow-origin") == "https://example.com"
+    # "*", not an echoed origin: no credentials are in play, so there is
+    # nothing an echoed origin would buy over the wildcard.
+    assert resp.headers.get("access-control-allow-origin") == "*"
 
 
 @patch("app.main.execute_magma", new_callable=AsyncMock)
@@ -365,7 +367,7 @@ def test_restricted_preflight_refuses_a_foreign_origin(tmp_path):
                 "Access-Control-Request-Method": "POST",
             },
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 400  # Starlette's CORSMiddleware, not our 403
     finally:
         server.terminate()
         server.wait(timeout=10)
