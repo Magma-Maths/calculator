@@ -4,10 +4,16 @@ import asyncio
 import json
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from app.config import Settings
 from app.executor import SupervisorBusy, execute_magma
 from app.parser import parse_magma_output
+
+if TYPE_CHECKING:
+    # Deferred: app.main imports this module, so importing it back at
+    # runtime would be circular.
+    from app.main import TrackedSemaphore
 
 logger = logging.getLogger("calculator")
 
@@ -37,7 +43,7 @@ def _status_file_problems(path: str) -> list[str]:
         return ["host-checks-unreadable"]
 
 
-async def _probe(settings: Settings, semaphore: asyncio.Semaphore) -> str:
+async def _probe(settings: Settings, semaphore: "TrackedSemaphore") -> str:
     # Never wait for a slot: under load the service is evidently alive.
     if semaphore.locked():
         return "busy"
@@ -65,7 +71,7 @@ async def _probe(settings: Settings, semaphore: asyncio.Semaphore) -> str:
     return "ok"
 
 
-async def check(settings: Settings, semaphore: asyncio.Semaphore) -> tuple[int, dict]:
+async def check(settings: Settings, semaphore: "TrackedSemaphore") -> tuple[int, dict]:
     """Return (HTTP status, body), running at most one probe per CACHE_SECONDS."""
     async with _lock:
         if _cached and time.monotonic() - _cached["at"] < CACHE_SECONDS:

@@ -27,12 +27,35 @@ from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
 from firecracker import protocol
 
+
+class TrackedSemaphore:
+    """Wraps asyncio.Semaphore and counts current holders in `count`, since
+    the semaphore itself exposes no public way to read that count.
+    """
+
+    def __init__(self, value: int):
+        self._semaphore = asyncio.Semaphore(value)
+        self.count = 0
+
+    def locked(self) -> bool:
+        return self._semaphore.locked()
+
+    async def __aenter__(self):
+        await self._semaphore.acquire()
+        self.count += 1
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self.count -= 1
+        self._semaphore.release()
+
+
 settings = Settings()
 rate_limiter = RateLimiter(
     per_minute=settings.rate_limit_per_minute,
     per_hour=settings.rate_limit_per_hour,
 )
-semaphore = asyncio.Semaphore(settings.max_concurrent)
+semaphore = TrackedSemaphore(settings.max_concurrent)
 usage_logger = UsageLogger(settings.usage_log_file)
 submission_logger = SubmissionLogger(settings.submission_log_file)
 
@@ -189,7 +212,7 @@ async def execute(req: ExecuteRequest, request: Request):
                        headers={"Retry-After": "60"})
 
     # Try to acquire concurrency slot without blocking
-    acquired = semaphore.locked() is False or semaphore._value > 0
+    acquired = not semaphore.locked()
     if not acquired:
         return _reject(503, "busy", "All execution slots busy", client_ip, len(req.code))
 
@@ -217,7 +240,7 @@ async def execute(req: ExecuteRequest, request: Request):
         submission_logger.log_arrival(request_id, client_ip, req.code)
     # Other requests already holding a slot when this one was admitted: a
     # cheap concurrency signal for the completion line below.
-    in_flight = settings.max_concurrent - semaphore._value
+    in_flight_at_admission = semaphore.count
 
     # An exception leaves these defaults in place, so both logs still
     # record exactly one outcome for every admitted request: never just a
@@ -240,7 +263,7 @@ async def execute(req: ExecuteRequest, request: Request):
         logger.info(json.dumps(completion))
         usage_logger.log(completion)
         submission_logger.log_completion(
-            request_id, elapsed=elapsed, in_flight_at_admission=in_flight, **submission_outcome,
+            request_id, elapsed=elapsed, in_flight_at_admission=in_flight_at_admission, **submission_outcome,
         )
 
 
