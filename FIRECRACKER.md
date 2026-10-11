@@ -52,9 +52,9 @@ release (`TimeoutStopSec` plus the 8 s drain) and one `boot_timeout` before
 its code reaches a guest. With the deployed values (5 + 8 + 20 s, plus a
 125 s exchange at `max_timeout` 120) that stays inside the API's
 `magma_timeout + 60` read deadline. A failed background boot is not
-retried; the next job on that slot boots on demand. Idle guests hold their
-memory. Stopping the supervisor waits for any staging or cleanup still
-running, then tears the idle guests down.
+retried; the next job on that slot waits for its release, then boots on
+demand. Idle guests hold their memory. Stopping the supervisor waits for
+any staging or cleanup still running, then tears the idle guests down.
 
 With `EXECUTOR_BACKEND=firecracker`, the API container runs as the image's
 `calculator` user, since it no longer needs root for nsjail's namespace
