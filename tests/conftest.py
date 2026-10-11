@@ -1,5 +1,4 @@
 import asyncio
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -7,126 +6,18 @@ from unittest.mock import patch
 
 import pytest
 
-# Settings has no default backend; set before app.main is first imported.
-os.environ.setdefault("EXECUTOR_BACKEND", "nsjail")
-
-from app.config import Settings  # noqa: E402
-from app.executor import ExecutionResult, wrap_magma_code  # noqa: E402
+from app.config import Settings
+from app.executor import ExecutionResult
+from app.magma_cmd import wrap_magma_code
 
 FAKE_MAGMA = str(Path(__file__).parent / "fake_magma.py")
-FAKE_NSJAIL = str(Path(__file__).parent / "fake_nsjail.py")
 
 # Check if real Magma is available on the system
 HAS_MAGMA = shutil.which("magma") is not None
 
-_FAKE_NSJAIL_CMD = f"""import runpy
-runpy.run_path({FAKE_NSJAIL!r}, run_name="__main__")
-"""
-
-
-def _fake_magma_exe(record: Path) -> str:
-    """Stand-in for magma.exe that records its argv and environment at `record`.
-
-    Like the real binary it will not start without its license file, which
-    the launcher script normally exports as MAGMAPASSFILE.
-    """
-    return f"""import json, os, runpy, sys
-if not os.path.isfile(os.environ.get("MAGMAPASSFILE", "")):
-    sys.exit("magma.exe: MAGMAPASSFILE is not set or does not exist")
-with open({str(record)!r}, "w") as f:
-    json.dump({{"argv": sys.argv, "env": dict(os.environ)}}, f)
-runpy.run_path({FAKE_MAGMA!r}, run_name="__main__")
-"""
-
-
-def _install_script(path: Path, body: str) -> None:
-    # The jail drops the caller's environment, so the interpreter is pinned
-    # by absolute path rather than found through PATH.
-    path.write_text(f"#!{sys.executable}\n{body}")
-    path.chmod(0o755)
-
-
-@pytest.fixture
-def magma_launch(tmp_path) -> Path:
-    """Where the fake magma.exe records the argv and environment it started with."""
-    return tmp_path / "magma-launch.json"
-
-
-def _fake_magma_tree(tmp_path: Path, record: Path) -> Path:
-    """Copy of the real install layout (magma.exe next to magmapassfile)."""
-    tree = tmp_path / "magma-2.29-10"
-    tree.mkdir()
-    (tree / "magmapassfile").write_text("")
-    _install_script(tree / "magma.exe", _fake_magma_exe(record))
-    return tree
-
-
-@pytest.fixture
-def nsjail_launch(tmp_path) -> Path:
-    """Where the fake nsjail records the flags it was started with."""
-    return tmp_path / "nsjail-launch.json"
-
-
-def _install_fake_nsjail(tmp_path: Path, monkeypatch) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _install_script(bin_dir / "nsjail", _FAKE_NSJAIL_CMD)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_NSJAIL_RECORD", str(tmp_path / "nsjail-launch.json"))
-
-
-def _jailed_client(tmp_path: Path, monkeypatch, magma_root: Path):
-    """POST /execute through the real execute_magma with a fake nsjail on PATH."""
-    _install_fake_nsjail(tmp_path, monkeypatch)
-    monkeypatch.setenv("MAGMA_ROOT", str(magma_root))
-    from app import main
-    monkeypatch.setattr(main, "settings", Settings())
-    from fastapi.testclient import TestClient
-    return TestClient(main.app)
-
-
-@pytest.fixture
-def jailed_magma(tmp_path, monkeypatch, magma_launch):
-    """MAGMA_ROOT points straight at the fake install tree."""
-    return _jailed_client(tmp_path, monkeypatch, _fake_magma_tree(tmp_path, magma_launch))
-
-
-def _jailed_client_running(tmp_path, monkeypatch, magma_launch, body: str):
-    tree = _fake_magma_tree(tmp_path, magma_launch)
-    _install_script(tree / "magma.exe", body)
-    return _jailed_client(tmp_path, monkeypatch, tree)
-
-
-@pytest.fixture
-def jailed_magma_killed_by_sigsys(tmp_path, monkeypatch, magma_launch):
-    """magma.exe dies by SIGSYS on start, as on a call the seccomp policy kills."""
-    return _jailed_client_running(tmp_path, monkeypatch, magma_launch, (
-        "import os, resource, signal\n"
-        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
-        "os.kill(os.getpid(), signal.SIGSYS)\n"
-    ))
-
-
-@pytest.fixture
-def jailed_magma_faking_sigsys(tmp_path, monkeypatch, magma_launch):
-    """magma.exe prints nsjail's SIGSYS log line and exits 159 normally."""
-    return _jailed_client_running(tmp_path, monkeypatch, magma_launch, (
-        "import sys\n"
-        "print('terminated with signal: SIGSYS (31)', file=sys.stderr)\n"
-        "sys.exit(159)\n"
-    ))
-
-
-@pytest.fixture
-def jailed_magma_via_symlink(tmp_path, monkeypatch, magma_launch):
-    """MAGMA_ROOT is a `current` symlink to the fake install tree, as on the host."""
-    current = tmp_path / "current"
-    current.symlink_to(_fake_magma_tree(tmp_path, magma_launch))
-    return _jailed_client(tmp_path, monkeypatch, current)
-
 
 async def _execute_with_fake_magma(code: str, settings: Settings) -> ExecutionResult:
-    """Run code through fake_magma.py instead of nsjail + real Magma."""
+    """Run code through fake_magma.py instead of the supervisor and real Magma."""
     wrapped = wrap_magma_code(code, settings.magma_timeout)
 
     proc = await asyncio.create_subprocess_exec(
@@ -163,7 +54,7 @@ def fake_magma():
 
 
 async def _execute_with_real_magma(code: str, settings: Settings) -> ExecutionResult:
-    """Run code through real Magma binary (without nsjail)."""
+    """Run code through the real Magma binary instead of the supervisor."""
     wrapped = wrap_magma_code(code, settings.magma_timeout)
 
     proc = await asyncio.create_subprocess_exec(

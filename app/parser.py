@@ -1,7 +1,8 @@
 import re
 from dataclasses import dataclass, field
 
-from app.executor import SECCOMP_KILLED, TIMEOUT_STDERR_MARKERS
+SECCOMP_KILLED = "killed by seccomp policy"
+TIMEOUT_STDERR_MARKERS = ("Alarm clock", "Cputime limit exceeded", "Killed")
 
 
 @dataclass
@@ -105,8 +106,7 @@ def parse_stderr_warnings(
     stderr: str | None, timed_out: bool = False, seccomp_killed: bool = False
 ) -> list[str]:
     """Checks timed_out/seccomp_killed independently of stderr text: the
-    Firecracker backend reports them as flags with no guaranteed matching
-    text, unlike nsjail's telltale stderr strings.
+    supervisor reports them as flags with no guaranteed matching text.
     """
     stderr = stderr or ""
     warnings = []

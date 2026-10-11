@@ -1,6 +1,6 @@
 # Magma Calculator Service
 
-REST API backend for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Executes Magma code inside an [nsjail](https://github.com/google/nsjail) sandbox and returns structured JSON results.
+REST API backend for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Runs each Magma job in its own [Firecracker](https://firecracker-microvm.github.io/) microVM, through a supervisor on the host, and returns structured JSON results.
 
 ## Protocol
 
@@ -108,137 +108,34 @@ Each line is also printed as JSON to the service log. A completion line carries 
 
 By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). To restrict, set `ALLOWED_ORIGIN` to a comma-separated list of origins (e.g. `https://magma-maths.org,http://localhost`). The special value `http://localhost` matches any port.
 
-## Setup
+## Deployment
 
-> **First time on a fresh Ubuntu server?** See [DEPLOY.md](DEPLOY.md) for a complete walkthrough.
+Deployment lives in the private Magma-Maths infrastructure repository.
 
-### Prerequisites
+## Configuration
 
-- **Docker** with support for `--cap-add SYS_ADMIN` (required for nsjail namespace creation)
-- **Magma** installed on the host (default: `/opt/magma`)
-
-### 1. Get the image
-
-Every push to `main` builds the image in GitHub Actions and publishes it as `ghcr.io/magma-maths/calculator`, tagged `sha-<short>` (the first 7 hex characters of the commit) and the moving `main`. A `v*` git tag retags that commit's `sha-<short>` image as the version without rebuilding, so a release is the same bytes that already ran from `main`. The image contains no Magma; the host's copy is bind-mounted at run time.
-
-Always run an exact tag: `sha-<short>` tags are immutable and `v*` tags are releases, so the version on a host is the one written down, and nothing changes it but you.
-
-```bash
-docker pull ghcr.io/magma-maths/calculator:v0.1.0
-```
-
-To build from source instead (the multi-stage Dockerfile compiles nsjail and installs the Python dependencies via Poetry), give the local build a tag of its own and use it in place of `v0.1.0` in the recipes below:
-
-```bash
-docker build -t ghcr.io/magma-maths/calculator:dev .
-```
-
-### 2. Configure
-
-```bash
-cp calculator.env.example calculator.env
-```
-
-Edit `calculator.env`. Key settings:
+The service reads these environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAGMA_ROOT` | `/opt/magma/current` | Magma version tree holding `magma.exe` and `magmapassfile`; must be under `/opt/magma` (the bind mount) |
 | `MAGMA_TIMEOUT` | 120 | Wall-clock timeout (seconds) |
 | `MAGMA_CPU_TIMEOUT` | 120 | CPU time limit (seconds) |
-| `MAGMA_MEMORY_MB` | 400 | Memory limit (MB) |
 | `MAGMA_INPUT_KB` | 50 | Max input size (KB) |
 | `MAGMA_OUTPUT_KB` | 20 | Max output size (KB) |
-| `JAIL_SECCOMP` | True | Load the seccomp policy `security/seccomp/magma.kafel` into the jail |
+| `SUPERVISOR_SOCKET` | `/run/magma-fc/supervisor.sock` | UNIX socket of the Firecracker supervisor that runs each job |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
-| `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is Traefik's in `traefik/docker-compose.yml` |
+| `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is the worker's reverse proxy |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
 
-`EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
-
-### 3a. Start Traefik (once per host)
-
-Traefik runs as a shared reverse proxy. If you already have a Traefik instance on the host, skip this step; just make sure its Docker network is named `traefik`.
-
-```bash
-cd traefik
-cp .env.example .env   # edit ACME_EMAIL
-docker compose up -d
-cd ..
-```
-
-This creates the `traefik` Docker network, binds ports 80/443, and handles Let's Encrypt certificates automatically. The dashboard is available on `127.0.0.1:8080`.
-
-The network is pinned to `172.30.0.0/24` with Traefik at `172.30.0.2`, because the calculator's rate limits key on the client address it reads from `X-Forwarded-For`, and it accepts that header only from `FORWARDED_ALLOW_IPS` (default `172.30.0.2`). With your own Traefik, set `FORWARDED_ALLOW_IPS` in `calculator.env` to its address on the shared network; otherwise every request counts against Traefik's address and one client can use up the limit for everyone. A `traefik` network created before this pin has to be removed and recreated.
-
-### 3b. Run with docker-compose (production)
-
-```bash
-cp .env.example .env   # set DOMAIN and CALCULATOR_VERSION
-docker compose up -d
-```
-
-Compose runs `ghcr.io/magma-maths/calculator:$CALCULATOR_VERSION`, pulling it when it is not already on the host. There is deliberately no default: if the variable is unset, compose refuses to start and names it, so a host always states its version and a `pull` or restart never changes the running code on its own. The calculator joins the shared `traefik` network. Traefik discovers it via Docker labels and routes `https://$DOMAIN` to it. A named volume (`calculator-data`) persists usage logs across restarts.
-
-To build from the working tree instead of pulling, add the dev override, which tags the build `calculator-dev` so a local build never takes over the pinned tag:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
-```
-
-`CALCULATOR_VERSION` must still be set, because compose interpolates the base file before applying the override, but its value is unused on this path.
-
-### 3c. Run without docker-compose (testing)
-
-```bash
-docker run --rm \
-  --cap-add SYS_ADMIN \
-  --tmpfs /tmp:size=128m \
-  -v /opt/magma:/opt/magma:ro \
-  -e EXECUTOR_BACKEND=nsjail \
-  -p 8080:8080 \
-  ghcr.io/magma-maths/calculator:v0.1.0
-```
-
-This runs the calculator on plain HTTP (port 8080) without Traefik or TLS.
-
-### Running multiple instances
-
-Start a second container with different limits for long-running computations:
-
-```bash
-docker run --rm \
-  --cap-add SYS_ADMIN \
-  --tmpfs /tmp:size=128m \
-  -v /opt/magma:/opt/magma:ro \
-  --env-file calculator-long.env \
-  -p 8081:8080 \
-  ghcr.io/magma-maths/calculator:v0.1.0
-```
-
 ## Security
 
-Each Magma process runs inside an nsjail sandbox with:
+Each job runs in its own freshly booted Firecracker microVM, started by a root supervisor on the host. The API container only ever talks to the supervisor's UNIX socket (`SUPERVISOR_SOCKET`) and never runs Magma itself. Inside the guest, Magma runs with the `-w` flag, a restricted mode that disables `System()`, `Pipe()`, `Open()` and other dangerous intrinsics, under the seccomp allow-list in `firecracker/guest/seccomp_policy.py`. A job that filter kills returns `exit_code` -1 and an error saying it made a system call the sandbox does not allow.
 
-- **PID, mount, network, and UTS namespace isolation**: the process cannot see or interact with the host
-- **No network access**: `clone_newnet` creates an empty network namespace
-- **Read-only mounts**: Magma installation and system libraries are bind-mounted read-only, `nosuid` and `nodev`
-- **Non-executable scratch space**: the per-request `/tmp` tmpfs is the only writable mount and is `noexec`, `nosuid` and `nodev`, so a file written by Magma code can never be run
-- **cgroup limits**: memory and CPU enforced at the kernel level
-- **Magma `-w` flag**: restricted mode that disables `System()`, `Pipe()`, `Open()`, and other dangerous intrinsics at the Magma level (no keyword filtering)
-- **Privilege drop**: nsjail runs as root to create namespaces, then drops to the `calculator` user for Magma execution
-- **Seccomp policy**: `security/seccomp/magma.kafel` allows only the system calls Magma was measured to use, plus a glibc baseline; any other call kills the process
-
-The executor passes the policy to nsjail while `JAIL_SECCOMP` is true, the default. A job killed by the policy returns `exit_code` -1, and its stderr starts with `killed by seccomp policy`.
-If that happens to legitimate code, rerun it with `JAIL_SECCOMP=false` to confirm the policy is the cause.
-Then find the missing call by running the same input under `strace -f` on the host, and add it to the policy.
-Turn the switch back on afterwards: it is a diagnostic, not a setting to leave off.
-
-An alternate backend runs each job inside its own Firecracker microVM instead of nsjail, for hosts that need per-request kernel isolation. Set `EXECUTOR_BACKEND=firecracker` and `SUPERVISOR_SOCKET` to the host's supervisor socket; see [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+See [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
 
 ### Submission log
 
@@ -253,4 +150,7 @@ Nothing in the service reads this file back; it exists only for a human to grep 
 ```bash
 poetry install           # install dependencies
 poetry run pytest -v     # run tests
+SUPERVISOR_SOCKET=/path/to/supervisor.sock poetry run python -m app.main   # serve on port 8080
 ```
+
+Without a supervisor listening on that socket, `/execute` answers 503.

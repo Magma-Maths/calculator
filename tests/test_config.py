@@ -8,10 +8,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_default_settings():
     settings = Settings()
-    assert settings.magma_root == "/opt/magma/current"
     assert settings.magma_timeout == 120
     assert settings.magma_cpu_timeout == 120
-    assert settings.magma_memory_mb == 400
     assert settings.magma_input_kb == 50
     assert settings.magma_output_kb == 20
     assert settings.max_concurrent == 4
@@ -19,18 +17,16 @@ def test_default_settings():
     assert settings.rate_limit_per_minute == 30
     assert settings.rate_limit_per_hour == 200
     assert settings.allowed_origin == "*"
-    assert settings.turnstile_enabled is False
-    assert settings.turnstile_secret_key == ""
     assert settings.submission_log_file == ""
 
 
 def test_settings_from_env(monkeypatch):
     monkeypatch.setenv("MAGMA_TIMEOUT", "300")
-    monkeypatch.setenv("MAGMA_MEMORY_MB", "800")
+    monkeypatch.setenv("MAGMA_CPU_TIMEOUT", "60")
     monkeypatch.setenv("ALLOWED_ORIGIN", "https://example.com")
     settings = Settings()
     assert settings.magma_timeout == 300
-    assert settings.magma_memory_mb == 800
+    assert settings.magma_cpu_timeout == 60
     assert settings.allowed_origin == "https://example.com"
 
 
@@ -67,41 +63,9 @@ def test_readme_defaults_match_settings():
         )
 
 
-def test_env_example_matches_settings():
-    """Ensure calculator.env.example stays in sync with Settings."""
-    settings = Settings()
-    lines = (ROOT / "calculator.env.example").read_text().splitlines()
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, val = line.partition("=")
-        field_name = key.lower()
-        actual = getattr(settings, field_name)
-        if isinstance(actual, bool):
-            expected = val.lower() in ("true", "1", "yes")
-        elif isinstance(actual, int):
-            expected = int(val) if val else None
-        else:
-            expected = val
-        assert actual == expected, (
-            f"{key}: calculator.env.example says {val!r}, "
-            f"Settings has {actual!r}"
-        )
-
-
 def test_allowed_origins_list_custom(monkeypatch):
     monkeypatch.setenv("ALLOWED_ORIGIN", "https://magma-maths.org,http://localhost")
     settings = Settings()
     origins = settings.allowed_origins_list
     assert "https://magma-maths.org" in origins
     assert "http://localhost" in origins
-
-
-def test_compose_leaves_settings_to_the_env_file():
-    """An environment: entry in compose would silently override calculator.env."""
-    import yaml
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    environment = compose["services"]["calculator"].get("environment") or {}
-    keys = environment if isinstance(environment, dict) else [e.split("=")[0] for e in environment]
-    assert not {k.lower() for k in keys} & set(Settings.model_fields)

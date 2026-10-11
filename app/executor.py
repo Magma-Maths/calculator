@@ -1,11 +1,9 @@
 import asyncio
 import logging
-import os
-import signal
 from dataclasses import dataclass
 
 from app.config import Settings
-from app.magma_cmd import magma_environment, wrap_magma_code  # noqa: F401 - re-exported
+from app.magma_cmd import wrap_magma_code
 from firecracker import protocol
 
 logger = logging.getLogger(__name__)
@@ -22,19 +20,6 @@ class SupervisorUnavailable(Exception):
 class InputTooLargeForWorker(Exception):
     """The code fits MAGMA_INPUT_KB but not the worker frame once JSON-escaped; answer 413."""
 
-SECCOMP_POLICY = "/app/security/seccomp/magma.kafel"
-SECCOMP_KILLED = "killed by seccomp policy"
-# nsjail exits with 128 + signal when the jailed process dies by a signal,
-# and logs one of these lines at INFO on the stderr it shares with Magma.
-# Magma can exit 159 and print the SIGSYS line itself, but it cannot stop
-# nsjail logging a normal exit afterwards.
-NSJAIL_EXIT_SIGSYS = 128 + signal.SIGSYS
-NSJAIL_LOG_SIGSYS = "terminated with signal: SIGSYS (31)"
-NSJAIL_LOG_EXITED = "exited with status: "
-# Shared with app/parser.py so the warning it derives from stderr text and
-# the executor's own `timed_out` flag never disagree about what counts.
-TIMEOUT_STDERR_MARKERS = ("Alarm clock", "Cputime limit exceeded", "Killed")
-
 
 @dataclass
 class ExecutionResult:
@@ -44,82 +29,15 @@ class ExecutionResult:
     truncated: bool = False
     timed_out: bool = False
     seccomp_killed: bool = False
-    # Firecracker only: measured by the guest agent independently of
-    # stdout, since the footer they would otherwise come from is lost
-    # whenever output is truncated or the job is killed. nsjail has only
-    # ever had the footer.
+    # Measured by the guest agent independently of stdout, since the footer
+    # they would otherwise come from is lost whenever output is truncated or
+    # the job is killed.
     cpu_time_sec: float | None = None
     peak_memory_kb: int | None = None
 
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
     wrapped = wrap_magma_code(code, settings.magma_timeout)
-    if settings.executor_backend == "firecracker":
-        return await execute_via_supervisor(wrapped, settings)
-    # Resolved per request, like the launcher's readlink -f: Magma opens
-    # package and library files lazily through these literal paths, so a
-    # session must stay on one tree across a `current` symlink flip while
-    # the next session picks up the new tree.
-    root = os.path.realpath(settings.magma_root)
-
-    cmd = [
-        "nsjail",
-        "--config", "/app/nsjail.cfg",
-        "--time_limit", str(settings.magma_timeout + 1),
-        "--cgroup_mem_max", str(settings.magma_memory_mb * 1024 * 1024),
-        "--rlimit_cpu", str(settings.magma_cpu_timeout),
-    ]
-    if settings.jail_seccomp:
-        cmd += ["--seccomp_policy", SECCOMP_POLICY]
-    for var in magma_environment(root):
-        cmd += ["--env", var]
-    cmd += ["--", f"{root}/magma.exe", "-w", "-n"]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=wrapped.encode("utf-8")),
-            timeout=settings.magma_timeout + 2,
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return ExecutionResult(
-            stdout="",
-            stderr="Killed",
-            exit_code=-1,
-            timed_out=True,
-        )
-
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
-    if (
-        settings.jail_seccomp
-        and proc.returncode == NSJAIL_EXIT_SIGSYS
-        and NSJAIL_LOG_SIGSYS in stderr
-        and NSJAIL_LOG_EXITED not in stderr
-    ):
-        return ExecutionResult(
-            stdout=stdout,
-            stderr=f"{SECCOMP_KILLED}\n{stderr}",
-            exit_code=-1,
-            seccomp_killed=True,
-        )
-    return ExecutionResult(
-        stdout=stdout,
-        stderr=stderr,
-        exit_code=proc.returncode or 0,
-        timed_out=any(marker in stderr for marker in TIMEOUT_STDERR_MARKERS),
-    )
-
-
-async def execute_via_supervisor(wrapped: str, settings: Settings) -> ExecutionResult:
     request = {
         "code": wrapped,
         "timeout": settings.magma_timeout,

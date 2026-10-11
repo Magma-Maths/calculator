@@ -254,8 +254,10 @@ def test_requests_turned_away_before_admission_are_logged(client, monkeypatch, c
     assert _entries(usage_log) == []
 
 
-def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_log):
-    resp = jailed_magma_killed_by_sigsys.post("/execute", json={"code": "print 1;"})
+@patch("app.main.execute_magma", new_callable=AsyncMock)
+def test_seccomp_kill_reported_and_logged(mock_exec, client, usage_log):
+    mock_exec.return_value = ExecutionResult(stdout="", stderr="", exit_code=-1, seccomp_killed=True)
+    resp = client.post("/execute", json={"code": "print 1;"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is False
@@ -270,9 +272,9 @@ def test_seccomp_kill_reported_and_logged(jailed_magma_killed_by_sigsys, usage_l
 
 @contextmanager
 def _start_server(tmp_path, **env):
-    """Start `python -m app.main` on a free port with the given env on top of
-    EXECUTOR_BACKEND=firecracker and an absent supervisor socket, so /execute
-    reaches the real middleware and settings wiring without needing Magma.
+    """Start `python -m app.main` with the given env and an absent supervisor
+    socket. Requests reach the real middleware and settings wiring without
+    needing Magma.
 
     Settings are read once at process startup, so any test of
     settings-dependent behaviour (CORS, rate-limit trust) needs its own
@@ -285,7 +287,6 @@ def _start_server(tmp_path, **env):
         port = s.getsockname()[1]
     full_env = dict(
         os.environ,
-        EXECUTOR_BACKEND="firecracker",
         SUPERVISOR_SOCKET=str(tmp_path / "absent.sock"),
         PORT=str(port),
         USAGE_LOG_FILE=str(tmp_path / "usage.jsonl"),

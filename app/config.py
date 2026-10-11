@@ -1,21 +1,12 @@
-from typing import Literal
-
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # Magma execution
-    magma_root: str = "/opt/magma/current"
     magma_timeout: int = 120
     magma_cpu_timeout: int = 120
-    magma_memory_mb: int = 400
     magma_input_kb: int = 50
     magma_output_kb: int = 20
-    jail_seccomp: bool = True
-
-    # No default: a worker whose environment omits it must not start on the
-    # in-container jail when the host was meant to run Firecracker.
-    executor_backend: Literal["nsjail", "firecracker"]
     supervisor_socket: str = "/run/magma-fc/supervisor.sock"
     # JSON written by the worker's host checks; /health/deep fails while it
     # lists problems. Empty skips it, as on hosts without those checks.
@@ -24,8 +15,8 @@ class Settings(BaseSettings):
     # Service
     max_concurrent: int = 4
     port: int = 8080
-    # Peers whose X-Forwarded-For names the client: Traefik's pinned address
-    # in traefik/docker-compose.yml.
+    # Peers whose X-Forwarded-For names the client: the worker's reverse
+    # proxy, pinned at this address by the deployment.
     forwarded_allow_ips: str = "172.30.0.2"
 
     # Rate limiting
@@ -40,10 +31,6 @@ class Settings(BaseSettings):
 
     # Submission logging (full code, for abuse investigation). Off unless set.
     submission_log_file: str = ""
-
-    # Optional Turnstile
-    turnstile_enabled: bool = False
-    turnstile_secret_key: str = ""
 
     @property
     def allowed_origins_list(self) -> list[str]:
