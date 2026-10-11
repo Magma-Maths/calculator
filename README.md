@@ -157,7 +157,6 @@ Edit `calculator.env`. Key settings:
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
-| `SUBMISSION_LOG_FILE` | `/data/submissions.jsonl` | Path for the submission log (JSON lines, holds code); empty disables it |
 
 `EXECUTOR_BACKEND` has no default: set it to `nsjail` or `firecracker`, or the service refuses to start.
 
@@ -243,11 +242,11 @@ An alternate backend runs each job inside its own Firecracker microVM instead of
 
 ### Submission log
 
-Separately from the usage log, `SUBMISSION_LOG_FILE` (default `/data/submissions.jsonl`, mode 0600) keeps the full code of every `/execute` request, once it reaches the executor, together with the client IP and the outcome (`exit_code`, `timed_out`, `seccomp_killed`, elapsed time, CPU time and memory, stdout and stderr size). Code is written at arrival, before execution, so a run that hangs or kills the worker still leaves it; a completion line with the same `request_id` always follows once the request is done, including a failure this service does not specifically recognize.
+Separately from the usage log, setting `SUBMISSION_LOG_FILE` to a path (written with mode 0600) keeps the full code of every `/execute` request, once it reaches the executor, together with the client IP and the outcome (`exit_code`, `timed_out`, `seccomp_killed`, elapsed time, CPU time and memory, stdout and stderr size). Code is written at arrival, before execution, so a run that hangs or kills the worker still leaves it; a completion line with the same `request_id` always follows once the request is done, including a failure this service does not specifically recognize.
 
 Rejected before reaching the executor (413 over the 50 KB input limit, 429 rate limited, or 503 with no free local slot) logs client IP, reason, and input size only, never code, and no completion line. Every other request keeps its code, including one the Firecracker worker later rejects for still being too large once framed: that is one of the things this log exists to catch.
 
-Nothing in the service reads this file back; it exists only for a human to grep after an incident, and it never leaves the machine. The host rotates it daily and deletes it after 90 days (see the infrastructure repo). A write error is transient and does not stop later writes; only a startup failure disables it for the life of the process.
+Nothing in the service reads this file back; it exists only for a human to grep after an incident, and it never leaves the machine. The log is off by default, and rotating and deleting it is the operator's job. A write error is transient and does not stop later writes; only a startup failure disables it for the life of the process.
 
 ## Development
 
