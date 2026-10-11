@@ -26,12 +26,15 @@ from app.ratelimit import RateLimiter
 from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
 
+
 settings = Settings()
 rate_limiter = RateLimiter(
     per_minute=settings.rate_limit_per_minute,
     per_hour=settings.rate_limit_per_hour,
 )
 semaphore = asyncio.Semaphore(settings.max_concurrent)
+# Counts executing submissions; health probes share the semaphore but are excluded.
+_in_flight = 0
 usage_logger = UsageLogger(settings.usage_log_file)
 submission_logger = SubmissionLogger(settings.submission_log_file)
 
@@ -155,7 +158,7 @@ async def execute(req: ExecuteRequest, request: Request):
                        headers={"Retry-After": "60"})
 
     # Try to acquire concurrency slot without blocking
-    acquired = semaphore.locked() is False or semaphore._value > 0
+    acquired = not semaphore.locked()
     if not acquired:
         return _reject(503, "busy", "All execution slots busy", client_ip, len(req.code))
 
@@ -174,7 +177,7 @@ async def execute(req: ExecuteRequest, request: Request):
     submission_logger.log_arrival(request_id, client_ip, req.code)
     # Other requests already holding a slot when this one was admitted: a
     # cheap concurrency signal for the completion line below.
-    in_flight = settings.max_concurrent - semaphore._value
+    in_flight_at_admission = _in_flight
 
     # An exception leaves these defaults in place, so both logs still
     # record exactly one outcome for every admitted request: never just a
@@ -197,7 +200,7 @@ async def execute(req: ExecuteRequest, request: Request):
         logger.info(json.dumps(completion))
         usage_logger.log(completion)
         submission_logger.log_completion(
-            request_id, elapsed=elapsed, in_flight_at_admission=in_flight, **submission_outcome,
+            request_id, elapsed=elapsed, in_flight_at_admission=in_flight_at_admission, **submission_outcome,
         )
 
 
@@ -205,7 +208,9 @@ async def _run(code: str, outcome: dict, submission_outcome: dict):
     """The /execute reply for admitted code; fills outcome and submission_outcome
     for the usage and submission completion records the outer finally writes.
     """
+    global _in_flight
     async with semaphore:
+        _in_flight += 1
         try:
             result: ExecutionResult = await execute_magma(code, settings)
         except tuple(_EXECUTOR_REJECTIONS) as exc:
@@ -213,6 +218,8 @@ async def _run(code: str, outcome: dict, submission_outcome: dict):
             outcome.update(status=status, reason=reason)
             submission_outcome.update(outcome=reason)
             return JSONResponse(status_code=status, content={"error": message})
+        finally:
+            _in_flight -= 1
 
     # Parse output
     parsed = parse_magma_output(result.stdout, settings.magma_output_bytes)
