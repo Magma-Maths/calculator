@@ -38,7 +38,7 @@ FAKE = textwrap.dedent(
             sys.stderr.write("boom\\n")
             sys.exit(3)
         else:
-            sys.stdout.write("env:" + os.environ.get("MAGMAPASSFILE", "") + "\\n")
+            sys.stdout.write("env:" + os.environ.get("SITE_DATA", "") + "\\n")
             sys.stdout.write("out:" + data.strip() + "\\n")
     """
 )
@@ -61,7 +61,7 @@ def fake_magma(tmp_path):
 def _req(exe, code, **over):
     base = {
         "code": code,
-        "env": {"MAGMAPASSFILE": "/opt/magma/current/magmapassfile", "PATH": os.environ["PATH"]},
+        "env": {"SITE_DATA": "/opt/site/data", "PATH": os.environ["PATH"]},
         "magma_exe": exe,
         "timeout": 5,
         "cpu_timeout": 5,
@@ -76,7 +76,7 @@ def test_run_job_success(fake_magma):
     assert reply["exit_code"] == 0
     assert reply["timed_out"] is False
     assert reply["truncated"] is False
-    assert "env:/opt/magma/current/magmapassfile" in reply["stdout"]
+    assert "env:/opt/site/data" in reply["stdout"]
     assert "out:print 1+1;" in reply["stdout"]
     assert reply["seccomp_killed"] is False
     assert reply["seccomp_mode"] == "off"

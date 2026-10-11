@@ -54,7 +54,7 @@ files = [
 [[package]]
 name = "click"
 version = "8.3.1"
-description = "Composable command line interface toolkit"
+description = "Composable command line toolkit"
 optional = false
 python-versions = ">=3.10"
 files = [

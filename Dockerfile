@@ -19,7 +19,7 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY app/ ./app/
-COPY firecracker/ ./firecracker/
+COPY firecracker/__init__.py firecracker/protocol.py ./firecracker/
 
 USER calculator
 EXPOSE 8080

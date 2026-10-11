@@ -68,11 +68,11 @@ def load_policy(rules=policy.RULES, errno_rules=policy.ERRNO_RULES):
         raise OSError(-rc, "seccomp_load")
 
 
-def test_wrapped_job_runs_under_the_policy():
+def test_wrapped_job_runs_under_the_policy(tmp_path):
     proc = subprocess.run(
         [MAGMA_EXE, "-w", "-n"],
         input=wrap_magma_code("print 2+2;", 10).encode(),
-        capture_output=True, env=guest_environment(MAGMA_ROOT), cwd="/tmp",
+        capture_output=True, env=guest_environment(MAGMA_ROOT), cwd=tmp_path,
         preexec_fn=load_policy, timeout=30,
     )
     assert proc.returncode == 0, (proc.returncode, proc.stderr)

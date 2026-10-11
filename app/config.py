@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # JSON written by the worker's host checks; /health/deep fails while it
     # lists problems. Empty skips it, as on hosts without those checks.
     health_status_file: str = ""
+    health_reject_pattern: str = ""
 
     # Service
     max_concurrent: int = 4

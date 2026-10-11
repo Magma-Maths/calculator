@@ -79,6 +79,8 @@ Runs `print 1+1;` through the configured executor and, when `HEALTH_STATUS_FILE`
 
 `status` is `ok` or `busy` with HTTP 200, or `fail` with HTTP 503 and the reasons in `problems` (for example `probe-wrong-output`, `probe-rejected`, `host-checks-stale`). The host checks write `{"problems": [...], "valid_until": <unix time>}`; a missing, unreadable or expired file counts as a failure.
 
+`HEALTH_REJECT_PATTERN` defaults to empty. Set it to a literal substring to reject probe stdout or stderr containing that text, reporting `probe-rejected`.
+
 ### GET /stats
 
 Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
@@ -135,7 +137,7 @@ The service reads these environment variables:
 
 Each job runs in its own freshly booted Firecracker microVM, started by a root supervisor on the host. The API container only ever talks to the supervisor's UNIX socket (`SUPERVISOR_SOCKET`) and never runs Magma itself. Inside the guest, Magma runs with the `-w` flag, a restricted mode that disables `System()`, `Pipe()`, `Open()` and other dangerous intrinsics, under the seccomp allow-list in `firecracker/guest/seccomp_policy.py`. A job that filter kills returns `exit_code` -1 and an error saying it made a system call the sandbox does not allow.
 
-See [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks.
+See [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks. Operators can supply a guest site hook, per-slot boot arguments, and a kernel config fragment.
 
 ### Submission log
 
