@@ -112,7 +112,7 @@ By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). T
 
 ## Deployment
 
-To host the service yourself, follow [FIRECRACKER.md](FIRECRACKER.md): it covers building the guest kernel, root filesystem and Magma image, the host layout and supervisor, and a first job end to end. Run the API with `SUPERVISOR_SOCKET` pointing at the supervisor's socket.
+To host the service yourself, follow [INSTALL.md](INSTALL.md); see [FIRECRACKER.md](FIRECRACKER.md) for the deeper operator reference.
 
 ## Configuration
 
