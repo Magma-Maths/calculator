@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -84,6 +85,44 @@ def test_replay_on_init(tmp_path):
     assert s["unique_ips"] == 2
     assert s["successes"] == 1
     assert s["failures"] == 1
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires time.tzset")
+@pytest.mark.parametrize("tz_name", ["UTC0", "EST5EDT,M3.2.0,M11.1.0"])
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+def test_stats_last_24h_uses_utc(tmp_path, monkeypatch, tz_name, replay):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", tz_name)
+            time.tzset()
+            now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc).timestamp()
+            assert time.localtime(now).tm_isdst == int(tz_name != "UTC0")
+            patch.setattr(time, "time", lambda: now)
+
+            path = tmp_path / "usage.jsonl"
+            ul = UsageLogger(str(path))
+            ul.log(_make_entry(
+                ts="2026-07-14T11:59:59Z", client_ip="1.1.1.1",
+                elapsed_sec=4.0, success=False,
+            ))
+            ul.log(_make_entry(
+                ts="2026-07-14T12:00:01Z", client_ip="2.2.2.2",
+                elapsed_sec=2.0, success=True,
+            ))
+            if replay:
+                ul = UsageLogger(str(path))
+
+            s = ul.stats()
+            assert s["all_time"]["total_requests"] == 2
+            assert s["last_24h"] == {
+                "total_requests": 1,
+                "unique_ips": 1,
+                "avg_elapsed_sec": 2.0,
+                "successes": 1,
+                "failures": 0,
+            }
+    finally:
+        time.tzset()
 
 
 def _arrival_entry(client_ip="1.2.3.4", request_id="r1", ts=None):

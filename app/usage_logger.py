@@ -1,3 +1,4 @@
+import calendar
 import json
 import logging
 import threading
@@ -67,7 +68,7 @@ class UsageLogger:
     @staticmethod
     def _parse_timestamp(ts_str: str) -> float | None:
         try:
-            return time.mktime(time.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+            return calendar.timegm(time.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ"))
         except (ValueError, OverflowError):
             return None
 
