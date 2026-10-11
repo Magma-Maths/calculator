@@ -112,7 +112,7 @@ By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). T
 
 ## Deployment
 
-Deployment lives in the private Magma-Maths infrastructure repository.
+To host the service yourself, follow [INSTALL.md](INSTALL.md); see [FIRECRACKER.md](FIRECRACKER.md) for the deeper operator reference.
 
 ## Configuration
 
