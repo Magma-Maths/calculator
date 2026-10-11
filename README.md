@@ -1,8 +1,10 @@
 # Magma Calculator Service
 
-REST API backend for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Runs each Magma job in its own [Firecracker](https://firecracker-microvm.github.io/) microVM, through a supervisor on the host, and returns structured JSON results.
+This is a self-hosted REST API for the [Magma](http://magma.maths.usyd.edu.au/) online calculator. Each job runs in a [Firecracker](https://firecracker-microvm.github.io/) microVM. An unprivileged API container sends jobs to a host supervisor over a UNIX socket.
 
-## Protocol
+To host the service, follow [INSTALL.md](INSTALL.md). [FIRECRACKER.md](FIRECRACKER.md) describes the worker and its security boundaries.
+
+## API
 
 ### POST /execute
 
@@ -33,7 +35,7 @@ Content-Type: application/json
 }
 ```
 
-When warnings are present (timeout, runtime error, output truncation), `success` is `false`, `error` carries the first one (a stderr warning before an output warning), and `warnings` lists the rest:
+When warnings occur (for example, a timeout, runtime error, or output truncation), `success` is `false`. The `error` field contains the first warning, preferring a stderr warning over an output warning; `warnings` contains the remaining warnings.
 
 ```json
 {
@@ -52,9 +54,9 @@ When warnings are present (timeout, runtime error, output truncation), `success`
 }
 ```
 
-A failure with no warning still gets an `error`: `Execution failed (exit code N)`.
+A failure without a warning still has an `error` field: `Execution failed (exit code N)`.
 
-**Error responses** return `{"error": "..."}` with no other fields:
+Error responses contain only `{"error": "..."}`:
 
 | Status | Meaning | Notes |
 |--------|---------|-------|
@@ -71,21 +73,21 @@ A failure with no warning still gets an `error`: `Execution failed (exit code N)
 
 ### GET /health/deep
 
-Runs `print 1+1;` through the configured executor and, when `HEALTH_STATUS_FILE` is set, reads the problems the host checks wrote there. The result is cached for 60 seconds, so at most one probe job runs per minute. The endpoint does not count against the rate limit. When every slot is busy it answers `busy` without running a job.
+Runs `print 1+1;` through the configured executor and, if `HEALTH_STATUS_FILE` is set, includes problems reported by host checks. Results are cached for 60 seconds, and the endpoint does not count against the rate limit. If all slots are busy, it returns `busy` without running a probe.
 
 ```json
 {"status": "ok", "probe": "ok", "problems": []}
 ```
 
-`status` is `ok` or `busy` with HTTP 200, or `fail` with HTTP 503 and the reasons in `problems` (for example `probe-wrong-output`, `probe-rejected`, `host-checks-stale`). The host checks write `{"problems": [...], "valid_until": <unix time>}`; a missing, unreadable or expired file counts as a failure.
+`status` is `ok` or `busy` with HTTP 200, or `fail` with HTTP 503 and reasons in `problems` (such as `probe-wrong-output`, `probe-rejected`, or `host-checks-stale`). Host checks write `{"problems": [...], "valid_until": <unix time>}`. A missing, unreadable, or expired status file counts as a failure.
 
-`HEALTH_REJECT_PATTERN` defaults to empty. Set it to a literal substring to reject probe stdout or stderr containing that text, reporting `probe-rejected`.
+`HEALTH_REJECT_PATTERN` defaults to empty. Set it to a literal substring to report `probe-rejected` when probe stdout or stderr contains it.
 
 ### GET /stats
 
-Returns aggregated usage statistics (all-time and last 24 hours), computed from the JSON-lines file at `USAGE_LOG_FILE`. Each `/execute` request that is admitted for execution writes two lines there, sharing a `request_id`: an `"event": "start"` line on arrival (timestamp, client IP, input size) and an `"event": "end"` line on completion with the outcome. Only completion lines feed the statistics, so a run that never returns leaves its arrival line and no count.
+Returns all-time and last-24-hour usage statistics from `USAGE_LOG_FILE`, a JSON-lines file. An admitted `/execute` request writes an `"event": "start"` line with its timestamp, client IP, and input size, then an `"event": "end"` line on completion. Both share a `request_id`; only completion lines count toward statistics. Each line is also printed as JSON to the service log.
 
-Each line is also printed as JSON to the service log. A completion line carries the HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large` or `error`. A request turned away before admission prints only an `"event": "rejected"` line, with `status` and `reason` (`too_large`, `rate_limited` or `busy`), and leaves `USAGE_LOG_FILE` and the statistics untouched.
+Completion lines include HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large`, or `error`. A request rejected before admission prints an `"event": "rejected"` line with `status` and a reason (`too_large`, `rate_limited`, or `busy`); it does not change `USAGE_LOG_FILE` or the statistics.
 
 ```json
 {
@@ -108,11 +110,7 @@ Each line is also printed as JSON to the service log. A completion line carries 
 
 ### CORS
 
-By default CORS is not enforced: all origins are allowed (`ALLOWED_ORIGIN=*`). To restrict, set `ALLOWED_ORIGIN` to a comma-separated list of origins (e.g. `https://magma-maths.org,http://localhost`). The special value `http://localhost` matches any port.
-
-## Deployment
-
-To host the service yourself, follow [INSTALL.md](INSTALL.md); see [FIRECRACKER.md](FIRECRACKER.md) for the deeper operator reference.
+CORS allows all origins by default (`ALLOWED_ORIGIN=*`). Set `ALLOWED_ORIGIN` to a comma-separated list to restrict access (for example, `https://example.org,http://localhost`). The value `http://localhost` matches any port.
 
 ## Configuration
 
@@ -135,17 +133,15 @@ The service reads these environment variables:
 
 ## Security
 
-Each job runs in its own freshly booted Firecracker microVM, started by a root supervisor on the host. The API container only ever talks to the supervisor's UNIX socket (`SUPERVISOR_SOCKET`) and never runs Magma itself. Inside the guest, Magma runs with the `-w` flag, a restricted mode that disables `System()`, `Pipe()`, `Open()` and other dangerous intrinsics, under the seccomp allow-list in `firecracker/guest/seccomp_policy.py`. A job that filter kills returns `exit_code` -1 and an error saying it made a system call the sandbox does not allow.
+The API container sends jobs to a root-owned host supervisor through `SUPERVISOR_SOCKET`; it does not run Magma. Each job uses its own Firecracker microVM, which is torn down after that job. Inside the guest, Magma runs with `-w`, a restricted mode, and a seccomp filter. If the filter kills a job for a disallowed system call, the response has `exit_code` -1 and an explanatory error.
 
-See [FIRECRACKER.md](FIRECRACKER.md) for the worker layout, protocols, and manual checks. Operators can supply a guest site hook, per-slot boot arguments, and a kernel config fragment.
+Each free slot has a [warm guest](FIRECRACKER.md#warm-pool), booted and connected before the supervisor hands it a job's code. After the job completes, the supervisor stops and cleans up the guest, then boots its replacement.
 
 ### Submission log
 
-Separately from the usage log, setting `SUBMISSION_LOG_FILE` to a path (written with mode 0600) keeps the full code of every `/execute` request, once it reaches the executor, together with the client IP and the outcome (`exit_code`, `timed_out`, `seccomp_killed`, elapsed time, CPU time and memory, stdout and stderr size). Code is written at arrival, before execution, so a run that hangs or kills the worker still leaves it; a completion line with the same `request_id` always follows once the request is done, including a failure this service does not specifically recognize.
+Set `SUBMISSION_LOG_FILE` to enable a mode-0600 log of requests that reach the executor. Each admitted request records its code and client IP before execution, then a completion record with the same `request_id`. The outcome includes `exit_code`, `timed_out`, `seccomp_killed`, elapsed and CPU time, memory, and output sizes.
 
-Rejected before reaching the executor (413 over the 50 KB input limit, 429 rate limited, or 503 with no free local slot) logs client IP, reason, and input size only, never code, and no completion line. Every other request keeps its code, including one the Firecracker worker later rejects for still being too large once framed: that is one of the things this log exists to catch.
-
-Nothing in the service reads this file back; it exists only for a human to grep after an incident, and it never leaves the machine. The log is off by default, and rotating and deleting it is the operator's job. A write error is transient and does not stop later writes; only a startup failure disables it for the life of the process.
+Requests rejected before execution include 413, 429, and 503 when no local slot is free. The service log prints an `"event": "rejected"` line. The submission log stores only client IP, reason, and input size; these requests omit code and have no completion record. A worker-side rejection for an oversized framed request is recorded with its code. The service does not read this file; it is local, off by default, and the operator manages rotation and deletion. A write error does not stop later writes; a startup failure disables logging for that process.
 
 ## Development
 
@@ -155,4 +151,4 @@ poetry run pytest -v     # run tests
 SUPERVISOR_SOCKET=/path/to/supervisor.sock poetry run python -m app.main   # serve on port 8080
 ```
 
-Without a supervisor listening on that socket, `/execute` answers 503.
+Without a supervisor listening on that socket, `/execute` returns 503.
