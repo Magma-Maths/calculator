@@ -206,7 +206,7 @@ operator notes.
 
    ```bash
    cd /opt/magma-fc/src
-   docker build -t magma-calculator:local .
+   docker build --build-arg CALCULATOR_VERSION="$(git rev-parse HEAD)" -t magma-calculator:local .
    docker volume create magma-calculator-data
    API_GID=$(getent group magma-api | cut -d: -f3)
    docker run -d --name magma-calculator --restart unless-stopped \

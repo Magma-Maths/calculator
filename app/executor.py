@@ -4,9 +4,11 @@ from dataclasses import dataclass
 
 from app.config import Settings
 from app.magma_cmd import wrap_magma_code
+from app.parser import parse_magma_output
 from firecracker import protocol
 
 logger = logging.getLogger(__name__)
+magma_version: str | None = None
 
 
 class SupervisorBusy(Exception):
@@ -37,6 +39,7 @@ class ExecutionResult:
 
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
+    global magma_version
     wrapped = wrap_magma_code(code, settings.magma_timeout)
     request = {
         "code": wrapped,
@@ -69,7 +72,7 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         logger.warning(
             "guest seccomp filter killed magma (mode=%s): %s", reply.get("seccomp_mode"), log_lines[0]
         )
-    return ExecutionResult(
+    result = ExecutionResult(
         stdout=str(reply.get("stdout", "")),
         stderr=str(reply.get("stderr", "")),
         exit_code=reply.get("exit_code", -1) if isinstance(reply.get("exit_code"), int) else -1,
@@ -82,3 +85,7 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         cpu_time_sec=protocol.bounded_cpu_time_sec(reply.get("cpu_time_sec")),
         peak_memory_kb=protocol.bounded_memory_kb(reply.get("peak_memory_kb")),
     )
+    version = parse_magma_output(result.stdout, settings.magma_output_bytes).version
+    if version is not None:
+        magma_version = version
+    return result

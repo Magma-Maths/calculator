@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     health_reject_pattern: str = ""
 
     # Service
+    calculator_version: str = "unknown"
     max_concurrent: int = 4
     port: int = 8080
     # Peers whose X-Forwarded-For names the client: the worker's reverse

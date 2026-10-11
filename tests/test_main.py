@@ -42,6 +42,104 @@ def test_health(client):
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.fixture
+def version_state(monkeypatch):
+    from app import deep_health, executor
+    monkeypatch.setattr(executor, "magma_version", None, raising=False)
+    monkeypatch.setattr(deep_health, "_cached", {})
+    monkeypatch.setattr(deep_health, "_lock", asyncio.Lock())
+
+
+@pytest.fixture
+def version_supervisor(tmp_path, monkeypatch, version_state):
+    import threading
+    from app import main
+    from app.config import Settings
+    from tests.test_executor_firecracker import _fake_supervisor
+
+    reply = {"stdout": MOCK_MAGMA_STDOUT, "stderr": "", "exit_code": 0,
+             "timed_out": False, "truncated": False}
+    settings = Settings(supervisor_socket=str(tmp_path / "sup.sock"))
+    monkeypatch.setattr(main, "settings", settings)
+    loop = asyncio.new_event_loop()
+    server, _ = loop.run_until_complete(_fake_supervisor(settings.supervisor_socket, reply))
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield reply
+    finally:
+        loop.call_soon_threadsafe(server.close)
+        asyncio.run_coroutine_threadsafe(server.wait_closed(), loop).result(timeout=5)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+def test_version_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("CALCULATOR_VERSION", raising=False)
+    with _start_server(tmp_path) as (_, url):
+        resp = httpx.get(f"{url}/version")
+    assert resp.status_code == 200
+    assert resp.json() == {"calculator": "unknown", "magma": None}
+
+
+def test_version_configured_revision(tmp_path):
+    with _start_server(tmp_path, CALCULATOR_VERSION="abc123") as (_, url):
+        resp = httpx.get(f"{url}/version")
+    assert resp.status_code == 200
+    assert resp.json() == {"calculator": "abc123", "magma": None}
+
+
+def test_version_after_execute(client, version_supervisor):
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    version = client.get("/version")
+    assert version.status_code == 200
+    assert version.json()["magma"] == resp.json()["magma"]["version"] == "2.29-4"
+    version_supervisor["stdout"] = MOCK_MAGMA_STDOUT.replace("2.29-4", "2.30-1")
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert client.get("/version").json()["magma"] == resp.json()["magma"]["version"] == "2.30-1"
+    version_supervisor.update(stdout="", exit_code=-1)
+    resp = client.post("/execute", json={"code": "print 1+1;"})
+    assert resp.json()["magma"]["version"] is None
+    assert client.get("/version").json()["magma"] == "2.30-1"
+
+
+def test_version_after_deep_health(client, version_supervisor):
+    resp = client.get("/health/deep")
+    assert resp.status_code == 200
+    assert resp.json()["probe"] == "ok"
+    version = client.get("/version")
+    assert version.status_code == 200
+    assert version.json()["magma"] == "2.29-4"
+
+
+def test_version_is_unlimited_and_unlogged(client, usage_log, monkeypatch, caplog):
+    from app import main
+    from app.ratelimit import RateLimiter
+    monkeypatch.setattr(main, "rate_limiter", RateLimiter(per_minute=0, per_hour=0))
+    with caplog.at_level("INFO", logger="calculator"):
+        for _ in range(3):
+            assert client.get("/version").status_code == 200
+    assert _entries(usage_log) == []
+    assert not [r for r in caplog.records if r.name == "calculator"]
+
+
+def test_version_cors_respects_allowed_origin(tmp_path):
+    with _start_server(tmp_path, ALLOWED_ORIGIN="https://example.org") as (_, url):
+        resp = httpx.get(f"{url}/version", headers={"Origin": "https://example.org"})
+        assert resp.status_code == 200
+        assert resp.headers["access-control-allow-origin"] == "https://example.org"
+        resp = httpx.options(f"{url}/version", headers={
+            "Origin": "https://example.org", "Access-Control-Request-Method": "GET",
+        })
+        assert resp.status_code == 200
+        assert "GET" in resp.headers["access-control-allow-methods"]
+        resp = httpx.get(f"{url}/version", headers={"Origin": "https://other.org"})
+        assert "access-control-allow-origin" not in resp.headers
+
+
 MOCK_MAGMA_STDOUT = (
     "Magma V2.29-4     Fri Jan 31 2026 [Seed = 42]\n"
     "quit.\n"
