@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.cors import CORSMiddleware
 
 from app import deep_health
 from app.config import Settings
@@ -63,47 +64,15 @@ _fixed_origins = [
     if o not in ("*", "http://localhost")
 ]
 
-
-def _origin_allowed(origin: str) -> bool:
-    if _allow_all_origins:
-        return True
-    if origin in _fixed_origins:
-        return True
-    if _allow_localhost and re.match(r"^http://localhost(:\d+)?$", origin):
-        return True
-    return False
-
-
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin", "")
-
-    if request.method == "OPTIONS":
-        if _origin_allowed(origin):
-            return JSONResponse(
-                content="",
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": origin or "*",
-                    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                    "Access-Control-Max-Age": "3600",
-                },
-            )
-        return JSONResponse(content={"error": "Forbidden"}, status_code=403)
-
-    response = await call_next(request)
-
-    if _allow_all_origins:
-        response.headers["Access-Control-Allow-Origin"] = "*"
-    elif origin and _origin_allowed(origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
-    if "Access-Control-Allow-Origin" in response.headers:
-        # Browsers hide non-safelisted headers such as the 429 Retry-After from scripts.
-        response.headers["Access-Control-Expose-Headers"] = "Retry-After"
-
-    return response
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if _allow_all_origins else _fixed_origins,
+    allow_origin_regex=r"^http://localhost(:\d+)?$" if _allow_localhost else None,
+    allow_methods=["GET", "POST"],  # the only methods any route accepts
+    allow_headers=["*"],
+    expose_headers=["Retry-After"],
+    max_age=3600,
+)
 
 
 class ExecuteRequest(BaseModel):
