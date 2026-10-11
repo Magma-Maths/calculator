@@ -15,6 +15,10 @@ FAKE = textwrap.dedent(
     import os, signal, sys, time
     if os.environ.get("FAKE_SIGSYS") == "1":
         os.kill(os.getpid(), signal.SIGSYS)
+    elif os.environ.get("FAKE_SIGKILL_LOW_CPU") == "1":
+        os.kill(os.getpid(), signal.SIGKILL)
+    elif os.environ.get("FAKE_SIGALRM") == "1":
+        os.kill(os.getpid(), signal.SIGALRM)
     elif os.environ.get("FAKE_NOSTIN") == "1":
         time.sleep(30)
     elif os.environ.get("FAKE_CPU_BURN") == "1":
@@ -145,6 +149,25 @@ def test_run_job_cpu_timeout_signal(fake_magma):
     assert reply["exit_code"] == -1
     assert reply["timed_out"] is True
     assert elapsed < 5
+
+
+def test_run_job_sigkill_with_low_cpu_is_not_timed_out(fake_magma):
+    """SIGKILL alone is ambiguous (the guest's own OOM killer uses it too);
+    with barely any CPU time behind it, this is not a timeout.
+    """
+    reply = agent.run_job(_req(fake_magma, "x", env={**_req(fake_magma, "x")["env"], "FAKE_SIGKILL_LOW_CPU": "1"}))
+    assert reply["exit_code"] == -1
+    assert reply["timed_out"] is False
+    assert reply["seccomp_killed"] is False
+
+
+def test_run_job_sigalrm_is_timed_out(fake_magma):
+    """The wrapper's own Alarm(timeout - 1) can kill Magma with an uncaught
+    SIGALRM before the agent's wall-deadline ever fires.
+    """
+    reply = agent.run_job(_req(fake_magma, "x", env={**_req(fake_magma, "x")["env"], "FAKE_SIGALRM": "1"}))
+    assert reply["exit_code"] == -1
+    assert reply["timed_out"] is True
 
 
 def test_run_job_caps_stderr(fake_magma):
