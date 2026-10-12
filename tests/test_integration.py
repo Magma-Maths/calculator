@@ -5,6 +5,38 @@ These exercise the full pipeline: FastAPI → executor → subprocess → parser
 - real_magma tests use the real Magma binary (skipped if not available)
 """
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "output, expected, truncated",
+    [
+        ("\u00e9" * 512, "\u00e9" * 512, True),
+        ("x" + "\u00e9" * 512, "x" + "\u00e9" * 511, True),
+        ("x" + "\U0001f600" * 256, "x" + "\U0001f600" * 255, True),
+        ("x" + "\u00e9" * 511, "x" + "\u00e9" * 511 + "\n", False),
+    ],
+    ids=["newline-over-cap", "two-byte-cut", "four-byte-cut", "exact-cap"],
+)
+def test_execute_utf8_output_cap(fake_magma, monkeypatch, output, expected, truncated):
+    from app import main
+    from app.parser import TRUNCATION_WARNING
+
+    monkeypatch.setattr(main.settings, "magma_output_kb", 1)
+    resp = fake_magma.post("/execute", json={"code": f'print "{output}";'})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["stdout"].encode("utf-8")) <= 1024
+    assert data["stdout"] == expected
+    assert data["truncated"] is truncated
+    assert data["success"] is not truncated
+    assert data["warnings"] == []
+    if truncated:
+        assert data["error"] == TRUNCATION_WARNING
+    else:
+        assert "error" not in data
+
 
 def test_simple_arithmetic(fake_magma):
     resp = fake_magma.post("/execute", json={"code": "print 1+1;"})
