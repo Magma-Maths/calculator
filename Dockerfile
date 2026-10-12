@@ -24,4 +24,9 @@ COPY firecracker/__init__.py firecracker/protocol.py ./firecracker/
 USER calculator
 EXPOSE 8080
 
+# Last, so a new revision reuses every cached layer above.
+ARG CALCULATOR_VERSION=unknown
+ENV CALCULATOR_VERSION=$CALCULATOR_VERSION
+LABEL org.opencontainers.image.revision=$CALCULATOR_VERSION
+
 CMD ["python", "-m", "app.main"]

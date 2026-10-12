@@ -71,6 +71,16 @@ Error responses contain only `{"error": "..."}`:
 {"status": "ok"}
 ```
 
+### GET /version
+
+Returns the calculator build revision and the latest Magma version observed in an executor reply, including deep-health probes. Reading `/version` does not run a job.
+`calculator` defaults to `"unknown"`; `magma` is `null` until a reply carries a version. Replies without a version preserve the last observed value.
+Like `/health`, this endpoint has no rate limit or usage log entry and follows `ALLOWED_ORIGIN` for browser access.
+
+```json
+{"calculator": "abc123", "magma": "2.29-4"}
+```
+
 ### GET /health/deep
 
 Runs `print 1+1;` through the configured executor and, if `HEALTH_STATUS_FILE` is set, includes problems reported by host checks. Results are cached for 60 seconds, and the endpoint does not count against the rate limit. If all slots are busy, it returns `busy` without running a probe.
@@ -123,6 +133,7 @@ The service reads these environment variables:
 | `MAGMA_INPUT_KB` | 50 | Max input size (KB) |
 | `MAGMA_OUTPUT_KB` | 20 | Max output size (KB) |
 | `SUPERVISOR_SOCKET` | `/run/magma-fc/supervisor.sock` | UNIX socket of the Firecracker supervisor that runs each job |
+| `CALCULATOR_VERSION` | `unknown` | Calculator build revision returned by `/version` |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
 | `PORT` | 8080 | Listen port inside container |
 | `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is the worker's reverse proxy |
@@ -144,6 +155,8 @@ Set `SUBMISSION_LOG_FILE` to enable a mode-0600 log of requests that reach the e
 Requests rejected before execution include 413, 429, and 503 when no local slot is free. The service log prints an `"event": "rejected"` line. The submission log stores only client IP, reason, and input size; these requests omit code and have no completion record. A worker-side rejection for an oversized framed request is recorded with its code. The service does not read this file; it is local, off by default, and the operator manages rotation and deletion. A write error does not stop later writes; a startup failure disables logging for that process.
 
 ## Development
+
+Include the checkout revision when building the image: `docker build --build-arg CALCULATOR_VERSION="$(git rev-parse HEAD)" .`.
 
 ```bash
 poetry install           # install dependencies

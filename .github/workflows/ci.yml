@@ -85,6 +85,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: CALCULATOR_VERSION=${{ github.sha }}
           load: true
           tags: |
             ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}

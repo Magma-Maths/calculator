@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
-from app import deep_health
+from app import deep_health, executor
 from app.config import Settings
 from app.executor import (
     ExecutionResult,
@@ -112,6 +112,11 @@ async def health():
 async def health_deep():
     status_code, body = await deep_health.check(settings, semaphore)
     return JSONResponse(status_code=status_code, content=body)
+
+
+@app.get("/version")
+async def version():
+    return {"calculator": settings.calculator_version, "magma": executor.magma_version}
 
 
 @app.get("/stats")
