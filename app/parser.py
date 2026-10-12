@@ -20,9 +20,12 @@ TRUNCATION_WARNING = "The output is too long and has been truncated."
 
 _RE_VERSION = re.compile(r"Magma V(\d+\.\d+(-[A-Z]*\d+)?)")
 _RE_SEED = re.compile(r"\[Seed = (\d+)\]")
-_RE_FOOTER_START = re.compile(r"Total time:\s+\d+\.\d+ seconds, Total memory usage: ")
-_RE_TIME = re.compile(r"Total time:\s+(\d+\.\d+)")
-_RE_MEMORY = re.compile(r"Total memory usage: (\d+\.\d+[A-Z]+)")
+_RE_FOOTER = re.compile(
+    r"^Total[ \t\n]+time:[ \t\n]+(?P<time>\d+\.\d+)[ \t\n]+seconds,"
+    r"[ \t\n]+Total[ \t\n]+memory[ \t\n]+usage:[ \t\n]+"
+    r"(?P<memory>\d+\.\d+[A-Z]+)\n\Z",
+    re.MULTILINE,
+)
 _RE_MACHINE_TYPE = re.compile(r"Machine type: .*\n")
 
 _ERROR_PATTERNS = [
@@ -49,11 +52,12 @@ def parse_magma_output(stdout: str, max_output_bytes: int) -> ParseResult:
 
     _extract_banner(banner, result)
 
-    footer_match = _RE_FOOTER_START.search(rest)
+    # Truncation can remove the real footer and leave a user's matching line.
+    footer_match = _RE_FOOTER.search(rest)
     if footer_match:
         body = rest[:footer_match.start()]
-        footer = rest[footer_match.start():]
-        _extract_footer(footer, result)
+        result.time_sec = float(footer_match.group("time"))
+        result.memory = footer_match.group("memory")
     else:
         body = rest
 
@@ -91,15 +95,6 @@ def _extract_banner(text: str, result: ParseResult) -> None:
     m = _RE_SEED.search(text)
     if m:
         result.seed = int(m.group(1))
-
-
-def _extract_footer(text: str, result: ParseResult) -> None:
-    m = _RE_TIME.search(text)
-    if m:
-        result.time_sec = float(m.group(1))
-    m = _RE_MEMORY.search(text)
-    if m:
-        result.memory = m.group(1)
 
 
 def parse_stderr_warnings(
