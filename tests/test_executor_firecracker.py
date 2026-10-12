@@ -167,6 +167,108 @@ def test_main_reports_timed_out_with_no_stderr_text(tmp_path, monkeypatch):
     assert submission_entries()[-1]["timed_out"] is True
 
 
+@pytest.mark.parametrize("truncated", [False, True], ids=["complete", "truncated"])
+def test_main_preserves_footer_shaped_user_output(tmp_path, monkeypatch, truncated):
+    import threading
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+    from app.parser import TRUNCATION_WARNING
+
+    settings = _settings(tmp_path)
+    banner = "Magma V2.29-4 [Seed = 42]\nquit.\n"
+    body = "Total time: 9.999 seconds, Total memory usage: 0.00MB\n42\n"
+    footer = "Total time: 0.050 seconds, Total memory usage: 12.34MB\n"
+    if truncated:
+        body += "x" * (settings.magma_output_bytes - len(banner + body))
+    reply = {
+        "stdout": banner + body + ("" if truncated else footer),
+        "stderr": "", "exit_code": 0, "timed_out": False, "truncated": truncated,
+    }
+    loop = asyncio.new_event_loop()
+    server = loop.run_until_complete(_fake_supervisor(settings.supervisor_socket, reply))[0]
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(app_main, "settings", settings)
+    try:
+        resp = TestClient(app_main.app).post(
+            "/execute",
+            json={"code": 'print "Total time: 9.999 seconds, Total memory usage: 0.00MB"; print 42;'},
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        server.close()
+        loop.close()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["stdout"] == body.rstrip("\n") + "\n"
+    assert data["magma"]["time_sec"] == (None if truncated else 0.05)
+    assert data["magma"]["memory"] == (None if truncated else "12.34MB")
+    assert data["truncated"] is truncated
+    assert data["success"] is (not truncated)
+    assert data["warnings"] == []
+    if truncated:
+        assert data["error"] == TRUNCATION_WARNING
+
+
+@pytest.mark.parametrize(
+    "width, footer, long_body",
+    [
+        (15, "Total time: \n0.000 seconds, \nTotal memory \nusage: 32.09MB\n",
+         ("x" * 14 + "\\\n") * 11 + "x" * 6 + "\n"),
+        (20, "Total time: 0.000 \nseconds, Total \nmemory usage: \n32.09MB\n",
+         ("x" * 19 + "\\\n") * 8 + "x" * 8 + "\n"),
+        (30, "Total time: 0.000 seconds, \nTotal memory usage: 32.09MB\n",
+         ("x" * 29 + "\\\n") * 5 + "x" * 15 + "\n"),
+        (50, "Total time: 0.000 seconds, Total memory usage: \n32.09MB\n",
+         ("x" * 49 + "\\\n") * 3 + "x" * 13 + "\n"),
+        (79, "Total time: 0.000 seconds, Total memory usage: 32.09MB\n",
+         ("x" * 78 + "\\\n") * 2 + "x" * 4 + "\n"),
+        (0, "Total time: 0.000 seconds, Total memory usage: 32.09MB\n",
+         "x" * 160 + "\n"),
+    ],
+    ids=["columns-15", "columns-20", "columns-30", "columns-50", "columns-79", "columns-0"],
+)
+@pytest.mark.parametrize("long_line", [False, True], ids=["number", "long-line"])
+def test_main_extracts_wrapped_footer(tmp_path, monkeypatch, width, footer, long_body, long_line):
+    import threading
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+
+    settings = _settings(tmp_path)
+    body = long_body if long_line else "42\n"
+    reply = {
+        "stdout": "Magma V2.29-10 [Seed = 42]\nquit.\n" + body
+        + ("" if long_line else "\n") + footer,
+        "stderr": "", "exit_code": 0, "timed_out": False, "truncated": False,
+    }
+    statement = 'printf "%o", "' + "x" * 160 + '";' if long_line else "print 42;"
+    loop = asyncio.new_event_loop()
+    server = loop.run_until_complete(_fake_supervisor(settings.supervisor_socket, reply))[0]
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(app_main, "settings", settings)
+    try:
+        resp = TestClient(app_main.app).post(
+            "/execute", json={"code": f"SetColumns({width}); {statement}"},
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        server.close()
+        loop.close()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["stdout"] == body
+    assert data["magma"]["time_sec"] == 0.0
+    assert data["magma"]["memory"] == "32.09MB"
+    assert data["success"] is True
+    assert data["truncated"] is False
+    assert data["warnings"] == []
+
+
 def test_firecracker_backend_reports_cpu_time_and_memory(tmp_path):
     settings = _settings(tmp_path)
     reply = {
