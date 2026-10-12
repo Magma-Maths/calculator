@@ -75,8 +75,9 @@ def parse_magma_output(stdout: str, max_output_bytes: int) -> ParseResult:
             result.warnings.append("An error occurred. See the output for details.")
             break
 
-    if len(body) > max_output_bytes:
-        body = body[:max_output_bytes]
+    body_bytes = body.encode("utf-8")
+    if len(body_bytes) > max_output_bytes:
+        body = body_bytes[:max_output_bytes].decode("utf-8", errors="ignore")
         result.truncated = True
         result.warnings.append(TRUNCATION_WARNING)
 
