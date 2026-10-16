@@ -377,27 +377,27 @@ class Runner:
         return not vm.reader.at_eof() and age + request["timeout"] + 5 < self.config.get("runtime_max_sec", 150)
 
     @staticmethod
-    async def _wait_ready(nxt: _Next) -> _Vm | None:
-        """Await the slot's boot without letting a cancelled job cancel it.
+    async def _settle(operation):
+        """Finish slot preparation before propagating cancellation.
 
-        On cancellation the boot still settles and its connection is closed
-        before run_job() releases the slot.
+        Threads and unit operations can keep changing the slot after their
+        caller is cancelled, so teardown must wait for them.
         """
+        task = asyncio.ensure_future(operation)
         try:
-            await asyncio.wait([nxt.ready])
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await asyncio.wait([nxt.ready])
-            if isinstance(nxt.ready.result(), _Vm):
-                nxt.ready.result().writer.close()
+            result = await task
+            if isinstance(result, _Vm):
+                result.writer.close()
             raise
-        return nxt.ready.result()
 
     async def _run_on_slot(self, slot: jail.Slot, nxt: _Next | None, request: dict) -> dict:
         unit = f"magma-fc@{slot.name}.service"
         # Retrying a boot the job already waited on could stack two boots and
         # a release ahead of a full-length job, past the API's read deadline.
         waited = nxt is not None and not nxt.ready.done() and not nxt.failed
-        vm = await self._wait_ready(nxt) if nxt is not None else None
+        vm = await self._settle(nxt.ready) if nxt is not None else None
         if waited and (vm is None or not self._usable(vm, request)):
             if vm is not None:
                 vm.writer.close()
@@ -407,11 +407,11 @@ class Runner:
             log.warning("next guest on %s is not usable; booting a fresh one", slot.name)
             if vm is not None:
                 vm.writer.close()
-            if not await self._release(slot):
+            if not await self._settle(self._release(slot)):
                 return _error("worker_failed", "guest did not come up")
             vm = None
         if vm is None:
-            vm = await self._boot(slot)
+            vm = await self._settle(self._boot(slot))
             if not isinstance(vm, _Vm):
                 return vm
         guest_request = {

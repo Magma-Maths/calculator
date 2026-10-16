@@ -1,7 +1,9 @@
 import asyncio
 import json
 import socket
+import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -10,7 +12,8 @@ import uvicorn
 from app import main
 from app.config import Settings
 from app.usage_logger import UsageLogger
-from firecracker.host import supervisor
+from firecracker.host import jail, supervisor
+from tests.test_fc_supervisor import FakeHost, config, _until
 
 
 class ControlledRunner(supervisor.Runner):
@@ -44,7 +47,7 @@ class ControlledRunner(supervisor.Runner):
 
 
 @asynccontextmanager
-async def live_api(monkeypatch, socket_path, tmp_path, *, per_ip=None, slots=4, rate=30):
+async def live_api(monkeypatch, socket_path, tmp_path, *, per_ip=None, slots=4, rate=30, runner=None):
     if per_ip is None:
         monkeypatch.delenv("MAX_CONCURRENT_PER_IP", raising=False)
     else:
@@ -55,7 +58,9 @@ async def live_api(monkeypatch, socket_path, tmp_path, *, per_ip=None, slots=4, 
     monkeypatch.setattr(main, "semaphore", asyncio.Semaphore(slots))
     monkeypatch.setattr(main, "usage_logger", UsageLogger(str(tmp_path / "usage.jsonl")))
     monkeypatch.setattr(main.rate_limiter, "per_minute", rate)
-    runner = ControlledRunner(slots)
+    controlled = runner is None
+    if controlled:
+        runner = ControlledRunner(slots)
     worker = await supervisor.serve(runner, str(socket_path), None)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -72,8 +77,9 @@ async def live_api(monkeypatch, socket_path, tmp_path, *, per_ip=None, slots=4, 
         async with httpx.AsyncClient(base_url=url, timeout=3) as client:
             yield client, runner
     finally:
-        runner.finish.set()
-        runner.allow_release.set()
+        if controlled:
+            runner.finish.set()
+            runner.allow_release.set()
         server.should_exit = True
         await asyncio.wait_for(serving, 5)
         worker.close()
@@ -115,6 +121,97 @@ def test_per_ip_cap_preserves_other_clients_and_global_admission(monkeypatch, so
                 await asyncio.gather(*jobs)
             assert (await post(client)).status_code == 200
             assert runner.free_slots() == 4
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["stage", "start", "retry-cleanup"])
+def test_disconnect_during_fresh_boot_holds_capacity(monkeypatch, socket_path, tmp_path, config, phase):
+    config.update(slots=config["slots"][:1], max_timeout=120, runtime_max_sec=180)
+    host = FakeHost(config["jail_base"])
+    entered = threading.Event()
+    finish = threading.Event()
+    overlaps = []
+    real_stage = jail.stage
+    real_cleanup = jail.cleanup
+    armed = False
+    job = None
+
+    def hold():
+        entered.set()
+        assert finish.wait(5), "slot mutation barrier timed out"
+
+    def stage(*args):
+        if armed and phase == "stage" and not entered.is_set():
+            hold()
+        return real_stage(*args)
+
+    def cleanup(*args):
+        if entered.is_set() and not finish.is_set():
+            overlaps.append(args)
+        if armed and phase == "retry-cleanup" and not entered.is_set():
+            hold()
+        return real_cleanup(*args)
+
+    async def systemctl(args):
+        if armed and phase == "start" and args[0] == "start" and not entered.is_set():
+            await asyncio.to_thread(hold)
+        return await host.systemctl(args)
+
+    monkeypatch.setattr(jail, "stage", stage)
+    monkeypatch.setattr(jail, "cleanup", cleanup)
+
+    async def run():
+        nonlocal armed, job
+        runner = supervisor.Runner(config, systemctl=systemctl, cgroup_populated=host.cgroup_populated)
+        run_job = runner.run_job
+
+        async def observed_job(request):
+            nonlocal job
+            job = asyncio.current_task()
+            return await run_job(request)
+
+        monkeypatch.setattr(runner, "run_job", observed_job)
+        first = None
+        try:
+            await runner.start()
+            await _until(lambda: len(host.connected) == 1)
+            host.kill("slot1")
+            await _until(lambda: runner._next["slot1"].ready.result().reader.at_eof())
+            armed = True
+            async with live_api(monkeypatch, socket_path, tmp_path, per_ip=1, slots=1,
+                                runner=runner) as (client, _):
+                try:
+                    first = asyncio.create_task(post(client))
+                    await _until(entered.is_set)
+                    first.cancel()
+                    await asyncio.gather(first, return_exceptions=True)
+                    await _until(lambda: job.cancelling())
+                    await asyncio.wait({job}, timeout=0.1)
+                    assert (await post(client)).status_code == 429
+                    assert (await post(client, ip="192.0.2.2")).status_code == 503
+                    assert runner.free_slots() == 0
+                    assert not overlaps, "cleanup overlapped an unfinished slot mutation"
+                    finish.set()
+
+                    def disconnected():
+                        records = (tmp_path / "usage.jsonl").read_text().splitlines()
+                        return any(json.loads(line).get("status") == 499 for line in records)
+
+                    await _until(disconnected)
+                    await _until(lambda: len(host.connected) >= 2 and runner.free_slots() == 1)
+                    replacement = Path(jail.jail_root(config["jail_base"], "slot1")) / "run/vsock.sock"
+                    assert replacement.exists()
+                    response = await post(client)
+                    assert response.status_code == 200
+                    assert response.json()["success"] is True
+                finally:
+                    finish.set()
+        finally:
+            finish.set()
+            if first:
+                await asyncio.gather(first, return_exceptions=True)
+            await runner.shutdown()
 
     asyncio.run(run())
 
