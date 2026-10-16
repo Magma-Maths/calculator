@@ -53,15 +53,27 @@ async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
         reader, writer = await asyncio.open_unix_connection(settings.supervisor_socket)
     except OSError as exc:
         raise SupervisorUnavailable() from exc
+    reply_task = asyncio.create_task(asyncio.wait_for(
+        protocol.read_frame(reader, protocol.MAX_REPLY_BYTES),
+        timeout=settings.magma_timeout + 60,
+    ))
     try:
         await protocol.write_frame(writer, request)
-        reply = await asyncio.wait_for(
-            protocol.read_frame(reader, protocol.MAX_REPLY_BYTES),
-            timeout=settings.magma_timeout + 60,
-        )
+        reply = await asyncio.shield(reply_task)
+    except asyncio.CancelledError:
+        # Half-close requests cancellation while keeping the reply readable.
+        # The supervisor replies only after stopping and draining the guest.
+        try:
+            writer.write_eof()
+            await reply_task
+        except (asyncio.TimeoutError, protocol.FrameError, OSError):
+            pass
+        raise
     except (asyncio.TimeoutError, protocol.FrameError, OSError) as exc:
         return ExecutionResult(stdout="", stderr=f"worker service error: {exc}", exit_code=-1)
     finally:
+        reply_task.cancel()
+        await asyncio.gather(reply_task, return_exceptions=True)
         await protocol.close_writer(writer)
     if reply.get("error") == "busy":
         raise SupervisorBusy()

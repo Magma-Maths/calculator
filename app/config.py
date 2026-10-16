@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     # Service
     calculator_version: str = "unknown"
     max_concurrent: int = 4
+    max_concurrent_per_ip: int = Field(default=2, ge=1)
     port: int = 8080
     # Peers whose X-Forwarded-For names the client: the worker's reverse
     # proxy, pinned at this address by the deployment.

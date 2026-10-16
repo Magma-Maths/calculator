@@ -174,15 +174,23 @@ class Runner:
             log.exception("job failed on %s", slot.name)
             reply = _error("worker_failed", "internal error")
         finally:
+            release = asyncio.create_task(self._release(slot))
+            clean = False
             try:
-                clean = await self._release(slot)
+                try:
+                    clean = await asyncio.shield(release)
+                except asyncio.CancelledError:
+                    # A disconnect can arrive after execution has finished,
+                    # while the unit is still stopping.
+                    clean = await release
+                    raise
             except Exception:
                 log.exception("release failed for %s; quarantining", slot.name)
-                clean = False
-            if clean:
-                self._add_free(slot)
-            else:
-                self._quarantined.append(slot.name)
+            finally:
+                if clean:
+                    self._add_free(slot)
+                else:
+                    self._quarantined.append(slot.name)
         self._log_outcome(slot.name, reply)
         return reply
 
@@ -499,11 +507,24 @@ async def serve(runner: Runner, path: str, group: str | None):
             except protocol.FrameError as exc:
                 await _send_reply(writer, _error("bad_request", str(exc)))
                 return
+            job = asyncio.create_task(runner.run_job(request))
+            disconnected = asyncio.create_task(reader.read(1))
             try:
-                reply = await runner.run_job(request)
+                done, _ = await asyncio.wait({job, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+                if job not in done:
+                    job.cancel()
+                    await asyncio.gather(job, return_exceptions=True)
+                    reply = _error("cancelled", "client disconnected")
+                else:
+                    reply = await job
             except Exception:
                 log.exception("unhandled error running job")
                 reply = _error("worker_failed", "internal error")
+            finally:
+                if not job.done() and not job.cancelling():
+                    job.cancel()
+                disconnected.cancel()
+                await asyncio.gather(job, disconnected, return_exceptions=True)
             await _send_reply(writer, reply)
         finally:
             active -= 1

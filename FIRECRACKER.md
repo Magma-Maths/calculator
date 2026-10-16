@@ -119,6 +119,15 @@ The supervisor adds `env` (string-to-string mapping) and `magma_exe`
 (string) for the guest request. It constructs the Magma environment from
 `app/magma_cmd.py`, with `PATH=/usr/bin:/bin`, `HOME=/tmp`, and `TMPDIR=/tmp`.
 
+After sending the request, the API keeps its write side open until the job
+finishes. EOF cancels the job, including when the HTTP client disconnects.
+The API half-closes the socket to request cancellation and keeps reading
+the reply. The supervisor stops and drains the guest before replying with
+`error: "cancelled"`; teardown finishes even if cancellation arrives while
+the guest is already stopping. API capacity remains occupied until that
+reply or a transport failure. Older supervisors finish the job normally
+before replying, so deploy matching API and supervisor versions together.
+
 A successful worker exchange returns these fields on both hops:
 
 | Fields | Meaning |

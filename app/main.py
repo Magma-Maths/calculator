@@ -35,6 +35,7 @@ rate_limiter = RateLimiter(
 semaphore = asyncio.Semaphore(settings.max_concurrent)
 # Counts executing submissions; health probes share the semaphore but are excluded.
 _in_flight = 0
+_running_by_ip: dict[str, int] = {}
 usage_logger = UsageLogger(settings.usage_log_file)
 submission_logger = SubmissionLogger(settings.submission_log_file)
 
@@ -150,6 +151,7 @@ _EXECUTOR_REJECTIONS = {
 
 @app.post("/execute")
 async def execute(req: ExecuteRequest, request: Request):
+    global _in_flight
     start_time = time.time()
     client_ip = request.client.host if request.client else "unknown"
 
@@ -161,6 +163,9 @@ async def execute(req: ExecuteRequest, request: Request):
     if not rate_limiter.is_allowed(client_ip):
         return _reject(429, "rate_limited", "Rate limit exceeded", client_ip, len(req.code),
                        headers={"Retry-After": "60"})
+
+    if _running_by_ip.get(client_ip, 0) >= settings.max_concurrent_per_ip:
+        return _reject(429, "ip_busy", "Too many simultaneous jobs from this IP", client_ip, len(req.code))
 
     # Try to acquire concurrency slot without blocking
     acquired = not semaphore.locked()
@@ -190,7 +195,16 @@ async def execute(req: ExecuteRequest, request: Request):
     outcome = {"status": 500, "reason": "error", "memory_used": None, "success": False, "warnings": []}
     submission_outcome = {"outcome": "error"}
     try:
-        return await _run(req.code, outcome, submission_outcome)
+        async with semaphore:
+            _in_flight += 1
+            _running_by_ip[client_ip] = _running_by_ip.get(client_ip, 0) + 1
+            try:
+                return await _run_connected(req.code, request, outcome, submission_outcome)
+            finally:
+                _in_flight -= 1
+                _running_by_ip[client_ip] -= 1
+                if not _running_by_ip[client_ip]:
+                    del _running_by_ip[client_ip]
     finally:
         elapsed = round(time.time() - start_time, 3)
         completion = {
@@ -209,22 +223,50 @@ async def execute(req: ExecuteRequest, request: Request):
         )
 
 
+async def _wait_for_disconnect(request: Request):
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _run_connected(code: str, request: Request, outcome: dict, submission_outcome: dict):
+    job = asyncio.create_task(_run(code, outcome, submission_outcome))
+    disconnected = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait({job, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+        if job in done:
+            return await job
+        outcome.update(status=499, reason="disconnected")
+        submission_outcome.update(outcome="disconnected")
+        return JSONResponse(status_code=499, content={"error": "Client disconnected"})
+    except asyncio.CancelledError:
+        outcome.update(status=499, reason="disconnected")
+        submission_outcome.update(outcome="disconnected")
+        raise
+    finally:
+        if not job.done() and not job.cancelling():
+            job.cancel()
+        disconnected.cancel()
+        # Cancellation starts executor teardown. Further request cancellations
+        # must not interrupt it or return capacity before it finishes.
+        settled = asyncio.gather(job, disconnected, return_exceptions=True)
+        while not settled.done():
+            try:
+                await asyncio.shield(settled)
+            except asyncio.CancelledError:
+                continue
+
+
 async def _run(code: str, outcome: dict, submission_outcome: dict):
     """The /execute reply for admitted code; fills outcome and submission_outcome
     for the usage and submission completion records the outer finally writes.
     """
-    global _in_flight
-    async with semaphore:
-        _in_flight += 1
-        try:
-            result: ExecutionResult = await execute_magma(code, settings)
-        except tuple(_EXECUTOR_REJECTIONS) as exc:
-            status, reason, message = _EXECUTOR_REJECTIONS[type(exc)]
-            outcome.update(status=status, reason=reason)
-            submission_outcome.update(outcome=reason)
-            return JSONResponse(status_code=status, content={"error": message})
-        finally:
-            _in_flight -= 1
+    try:
+        result: ExecutionResult = await execute_magma(code, settings)
+    except tuple(_EXECUTOR_REJECTIONS) as exc:
+        status, reason, message = _EXECUTOR_REJECTIONS[type(exc)]
+        outcome.update(status=status, reason=reason)
+        submission_outcome.update(outcome=reason)
+        return JSONResponse(status_code=status, content={"error": message})
 
     # Parse output
     parsed = parse_magma_output(result.stdout, settings.magma_output_bytes)

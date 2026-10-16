@@ -227,7 +227,10 @@ operator notes.
    existing volume must be writable by the container user.
 
    Set `MAX_CONCURRENT` to your slot count and keep both API timeouts within
-   `max_timeout`. This example initially trusts no forwarded client headers;
+   `max_timeout`. `MAX_CONCURRENT_PER_IP` defaults to 2 and must be positive.
+   Clients sharing a public IP share that cap. Both limits apply per API
+   process, so run one API process for this supervisor.
+   This example initially trusts no forwarded client headers;
    configure that setting when adding your proxy. See the
    [README configuration table](README.md#configuration) for API environment
    variables and defaults. Add settings with `--env` or `--env-file` when
