@@ -1,0 +1,6 @@
+firecracker/guest/init.sh	/opt/calculator-guest/init.sh	0755
+firecracker/__init__.py	/opt/calculator-guest/firecracker/__init__.py	0644
+firecracker/protocol.py	/opt/calculator-guest/firecracker/protocol.py	0644
+firecracker/guest/__init__.py	/opt/calculator-guest/firecracker/guest/__init__.py	0644
+firecracker/guest/agent.py	/opt/calculator-guest/firecracker/guest/agent.py	0644
+firecracker/guest/seccomp_policy.py	/opt/calculator-guest/firecracker/guest/seccomp_policy.py	0644
