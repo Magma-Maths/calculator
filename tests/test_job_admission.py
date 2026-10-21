@@ -11,6 +11,7 @@ import uvicorn
 
 from app import main
 from app.config import Settings
+from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
 from firecracker.host import jail, supervisor
 from tests.test_fc_supervisor import FakeHost, config, _until
@@ -297,3 +298,50 @@ def test_disconnect_holds_capacity_until_teardown(monkeypatch, socket_path, tmp_
                     await direct.aclose()
 
     asyncio.run(run())
+
+
+def test_reservations_precede_arrival_logging_and_outlast_teardown(monkeypatch, socket_path, tmp_path):
+    submissions = SubmissionLogger(str(tmp_path / "submissions.jsonl"))
+    entered, release = threading.Event(), threading.Event()
+    log_arrival = submissions.log_arrival
+
+    def pause_first_arrival(*args):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5), "arrival write was not released"
+        return log_arrival(*args)
+
+    monkeypatch.setattr(submissions, "log_arrival", pause_first_arrival)
+    monkeypatch.setattr(main, "submission_logger", submissions)
+
+    async def run():
+        async with live_api(monkeypatch, socket_path, tmp_path, per_ip=1, slots=1) as (client, runner):
+            runner.allow_release.clear()
+            first = asyncio.create_task(post(client, "hold"))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                rejected = await post(client)
+                assert rejected.status_code == 429
+                assert "simultaneous" in rejected.json()["error"].lower()
+                assert (await post(client, ip="192.0.2.2")).status_code == 503
+                release.set()
+                await asyncio.wait_for(runner.started.get(), 2)
+                first.cancel()
+                await asyncio.wait_for(runner.releasing.wait(), 2)
+                assert (await post(client)).status_code == 429
+                assert (await post(client, ip="192.0.2.2")).status_code == 503
+                runner.allow_release.set()
+                async with asyncio.timeout(2):
+                    while "disconnected" not in (tmp_path / "submissions.jsonl").read_text():
+                        await asyncio.sleep(0.01)
+                assert (await post(client)).status_code == 200
+            finally:
+                release.set()
+                runner.finish.set()
+                runner.allow_release.set()
+                await asyncio.gather(first, return_exceptions=True)
+
+    asyncio.run(run())
+    records = [json.loads(line) for line in (tmp_path / "submissions.jsonl").read_text().splitlines()]
+    assert [r["reason"] for r in records if "reason" in r] == ["ip_busy", "busy"] * 2
+    assert [r["outcome"] for r in records if "outcome" in r] == ["disconnected", "completed"]

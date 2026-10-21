@@ -113,6 +113,14 @@ Keep shared images and their parent directories writable only by root.
 
 ## 3. The protocols
 
+The API can send `{"operation":"metadata"}` over the supervisor socket.
+This read-only operation returns only `guest_memory_bytes`,
+`max_timeout_seconds`, and `max_output_bytes`. It claims no execution slot,
+boots no guest, and remains available when all job slots are occupied.
+It shares the socket's connection cap and I/O deadlines.
+The API sends at most one at a time and reuses each reply for 10 seconds.
+`/info` treats a missing, invalid, or unavailable reply as unconfirmed limits.
+
 The API opens one UNIX-socket connection per job. Its request contains
 `code` (string), `timeout`, `cpu_timeout`, and `output_bytes` (integers).
 The supervisor adds `env` (string-to-string mapping) and `magma_exe`

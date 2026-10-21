@@ -507,6 +507,13 @@ async def serve(runner: Runner, path: str, group: str | None):
             except protocol.FrameError as exc:
                 await _send_reply(writer, _error("bad_request", str(exc)))
                 return
+            if request == {"operation": "metadata"}:
+                await _send_reply(writer, {
+                    "guest_memory_bytes": runner.config["mem_mib"] * 1024 * 1024,
+                    "max_timeout_seconds": runner.config.get("max_timeout", 300),
+                    "max_output_bytes": protocol.MAX_REPLY_BYTES // 2,
+                })
+                return
             job = asyncio.create_task(runner.run_job(request))
             disconnected = asyncio.create_task(reader.read(1))
             try:

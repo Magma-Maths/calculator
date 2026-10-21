@@ -267,5 +267,9 @@ operator notes.
 
 Optionally enable the [submission log](README.md#submission-log) with
 `SUBMISSION_LOG_FILE=/data/submissions.jsonl`. It is off by default.
-Manage log rotation and deletion yourself, including logs in the `/data`
-volume; the service does not rotate them.
+Set `LOG_RETENTION_DAYS` to a positive integer to expire raw usage and
+submission records on the same schedule, including during idle periods.
+Give the API access to existing archives and remove external rotation rules
+for these two files. `/info` reports the configured days after successful cleanup.
+See [record retention](README.md#record-retention) for archive names,
+statistics persistence, and separately managed service logs and backups.

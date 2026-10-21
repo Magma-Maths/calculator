@@ -260,7 +260,7 @@ def test_request_is_logged_before_execution(client, usage_log):
     assert completion["success"] is True
     assert completion["elapsed_sec"] >= 0
 
-    assert _stats()["all_time"]["total_requests"] == 1
+    assert _stats()["retained"]["total_requests"] == 1
     assert _stats()["last_24h"]["total_requests"] == 1
 
 
@@ -280,7 +280,7 @@ def test_arrival_line_is_written_before_execution(client, usage_log):
     [_, completion] = _entries(usage_log)
     assert completion["event"] == "end" and completion["success"] is False
     assert (completion["status"], completion["reason"]) == (500, "error")
-    assert _stats()["all_time"]["failures"] == 1
+    assert _stats()["retained"]["failures"] == 1
 
 
 def test_rejected_request_leaves_no_arrival_line(client, usage_log):
@@ -293,10 +293,10 @@ def test_stats_endpoint(client):
     resp = client.get("/stats")
     assert resp.status_code == 200
     data = resp.json()
-    assert "all_time" in data
+    assert "retained" in data
     assert "last_24h" in data
     for key in ("total_requests", "unique_ips", "avg_elapsed_sec", "successes", "failures"):
-        assert key in data["all_time"]
+        assert key in data["retained"]
         assert key in data["last_24h"]
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 from app.config import Settings
@@ -36,6 +37,39 @@ class ExecutionResult:
     # the job is killed.
     cpu_time_sec: float | None = None
     peak_memory_kb: int | None = None
+
+
+METADATA_CACHE_SECONDS = 10
+_metadata_lock = asyncio.Lock()
+_metadata: dict = {}
+
+
+async def supervisor_metadata(settings: Settings) -> dict:
+    """The supervisor's limits, or {} when unavailable, fetched at most once per
+    METADATA_CACHE_SECONDS. Each fetch holds one of the supervisor connections
+    that jobs need, so concurrent callers wait for one fetch and share its result.
+    """
+    async with _metadata_lock:
+        if _metadata and time.monotonic() - _metadata["at"] < METADATA_CACHE_SECONDS:
+            return _metadata["reply"]
+        reply = await _fetch_metadata(settings)
+        _metadata.update(at=time.monotonic(), reply=reply)
+        return reply
+
+
+async def _fetch_metadata(settings: Settings) -> dict:
+    async def exchange():
+        reader, writer = await asyncio.open_unix_connection(settings.supervisor_socket)
+        try:
+            await protocol.write_frame(writer, {"operation": "metadata"})
+            return await protocol.read_frame(reader, 4096)
+        finally:
+            await protocol.close_writer(writer)
+
+    try:
+        return await asyncio.wait_for(exchange(), timeout=2)
+    except (OSError, asyncio.TimeoutError, protocol.FrameError):
+        return {}
 
 
 async def execute_magma(code: str, settings: Settings) -> ExecutionResult:
