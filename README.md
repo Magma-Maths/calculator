@@ -63,7 +63,19 @@ Error responses contain only `{"error": "..."}`:
 | 413 | Input too large | Exceeds `MAGMA_INPUT_KB`, or the Firecracker request frame once JSON-escaped |
 | 422 | Missing `code` field | FastAPI validation error |
 | 429 | Rate limit exceeded | Includes `Retry-After: 60` header, readable from browser scripts through `Access-Control-Expose-Headers` |
+| 429 | Too many simultaneous jobs from this IP | Retry after a running job finishes; no fixed retry delay |
 | 503 | All execution slots busy | Try again later; also returned while the Firecracker supervisor is unreachable |
+
+Each IP can run two jobs simultaneously by default. `MAX_CONCURRENT_PER_IP`
+sets a positive cap per API process; clients sharing a public IP share that
+cap. `MAX_CONCURRENT` still limits total jobs, with no waiting queue.
+Attempts rejected by either concurrency limit still count toward the rate
+limits. Configure `FORWARDED_ALLOW_IPS` for your trusted reverse proxy so
+these limits use the client address.
+
+Closing the HTTP connection cancels the job. Capacity stays occupied until
+the supervisor finishes guest teardown. Run matching API and supervisor
+versions to support prompt cancellation.
 
 ### GET /health
 
@@ -97,7 +109,7 @@ Runs `print 1+1;` through the configured executor and, if `HEALTH_STATUS_FILE` i
 
 Returns all-time and last-24-hour usage statistics from `USAGE_LOG_FILE`, a JSON-lines file. An admitted `/execute` request writes an `"event": "start"` line with its timestamp, client IP, and input size, then an `"event": "end"` line on completion. Both share a `request_id`; only completion lines count toward statistics. Each line is also printed as JSON to the service log.
 
-Completion lines include HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large`, or `error`. A request rejected before admission prints an `"event": "rejected"` line with `status` and a reason (`too_large`, `rate_limited`, or `busy`); it does not change `USAGE_LOG_FILE` or the statistics.
+Completion lines include HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large`, `error`, or `disconnected`. A disconnected request records status 499. A request rejected before admission prints an `"event": "rejected"` line with `status` and a reason (`too_large`, `rate_limited`, `ip_busy`, or `busy`); it does not change `USAGE_LOG_FILE` or the statistics.
 
 ```json
 {
@@ -135,6 +147,7 @@ The service reads these environment variables:
 | `SUPERVISOR_SOCKET` | `/run/magma-fc/supervisor.sock` | UNIX socket of the Firecracker supervisor that runs each job |
 | `CALCULATOR_VERSION` | `unknown` | Calculator build revision returned by `/version` |
 | `MAX_CONCURRENT` | 4 | Simultaneous execution slots |
+| `MAX_CONCURRENT_PER_IP` | 2 | Simultaneous jobs per IP per API process; positive integer |
 | `PORT` | 8080 | Listen port inside container |
 | `FORWARDED_ALLOW_IPS` | `172.30.0.2` | Comma-separated proxy addresses whose `X-Forwarded-For` gives the client address; the default is the worker's reverse proxy |
 | `RATE_LIMIT_PER_MINUTE` | 30 | Requests per IP per minute |

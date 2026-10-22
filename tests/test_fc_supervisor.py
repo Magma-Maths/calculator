@@ -123,6 +123,40 @@ def test_run_job_success_full_lifecycle(config):
     assert runner.free_slots() == 2
 
 
+@pytest.mark.parametrize("half_close", [False, True], ids=["close", "half-close"])
+def test_client_disconnect_stops_guest_before_reusing_slot(config, half_close):
+    host = FakeHost(config["jail_base"], agent_delay=10)
+    runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+
+    async def run():
+        server = await supervisor.serve(runner, config["socket"], None)
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        try:
+            await protocol.write_frame(writer, _request())
+            async with asyncio.timeout(2):
+                while not host.seen_requests:
+                    await asyncio.sleep(0.01)
+            if half_close:
+                writer.write_eof()
+                reply = await asyncio.wait_for(protocol.read_frame(reader, protocol.MAX_REPLY_BYTES), 2)
+                assert reply["error"] == "cancelled"
+                assert runner.free_slots() == 2
+            else:
+                writer.close()
+            async with asyncio.timeout(2):
+                while runner.free_slots() != 2:
+                    await asyncio.sleep(0.01)
+            assert ["stop", "magma-fc@slot1.service"] in host.calls
+            assert not os.path.exists(jail.jail_root(config["jail_base"], "slot1"))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+
+
 def test_run_job_boot_timeout_stops_unit(config):
     host = FakeHost(config["jail_base"], boot=False)
     runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)

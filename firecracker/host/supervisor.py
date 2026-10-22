@@ -174,15 +174,23 @@ class Runner:
             log.exception("job failed on %s", slot.name)
             reply = _error("worker_failed", "internal error")
         finally:
+            release = asyncio.create_task(self._release(slot))
+            clean = False
             try:
-                clean = await self._release(slot)
+                try:
+                    clean = await asyncio.shield(release)
+                except asyncio.CancelledError:
+                    # A disconnect can arrive after execution has finished,
+                    # while the unit is still stopping.
+                    clean = await release
+                    raise
             except Exception:
                 log.exception("release failed for %s; quarantining", slot.name)
-                clean = False
-            if clean:
-                self._add_free(slot)
-            else:
-                self._quarantined.append(slot.name)
+            finally:
+                if clean:
+                    self._add_free(slot)
+                else:
+                    self._quarantined.append(slot.name)
         self._log_outcome(slot.name, reply)
         return reply
 
@@ -369,27 +377,27 @@ class Runner:
         return not vm.reader.at_eof() and age + request["timeout"] + 5 < self.config.get("runtime_max_sec", 150)
 
     @staticmethod
-    async def _wait_ready(nxt: _Next) -> _Vm | None:
-        """Await the slot's boot without letting a cancelled job cancel it.
+    async def _settle(operation):
+        """Finish slot preparation before propagating cancellation.
 
-        On cancellation the boot still settles and its connection is closed
-        before run_job() releases the slot.
+        Threads and unit operations can keep changing the slot after their
+        caller is cancelled, so teardown must wait for them.
         """
+        task = asyncio.ensure_future(operation)
         try:
-            await asyncio.wait([nxt.ready])
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await asyncio.wait([nxt.ready])
-            if isinstance(nxt.ready.result(), _Vm):
-                nxt.ready.result().writer.close()
+            result = await task
+            if isinstance(result, _Vm):
+                result.writer.close()
             raise
-        return nxt.ready.result()
 
     async def _run_on_slot(self, slot: jail.Slot, nxt: _Next | None, request: dict) -> dict:
         unit = f"magma-fc@{slot.name}.service"
         # Retrying a boot the job already waited on could stack two boots and
         # a release ahead of a full-length job, past the API's read deadline.
         waited = nxt is not None and not nxt.ready.done() and not nxt.failed
-        vm = await self._wait_ready(nxt) if nxt is not None else None
+        vm = await self._settle(nxt.ready) if nxt is not None else None
         if waited and (vm is None or not self._usable(vm, request)):
             if vm is not None:
                 vm.writer.close()
@@ -399,11 +407,11 @@ class Runner:
             log.warning("next guest on %s is not usable; booting a fresh one", slot.name)
             if vm is not None:
                 vm.writer.close()
-            if not await self._release(slot):
+            if not await self._settle(self._release(slot)):
                 return _error("worker_failed", "guest did not come up")
             vm = None
         if vm is None:
-            vm = await self._boot(slot)
+            vm = await self._settle(self._boot(slot))
             if not isinstance(vm, _Vm):
                 return vm
         guest_request = {
@@ -499,11 +507,24 @@ async def serve(runner: Runner, path: str, group: str | None):
             except protocol.FrameError as exc:
                 await _send_reply(writer, _error("bad_request", str(exc)))
                 return
+            job = asyncio.create_task(runner.run_job(request))
+            disconnected = asyncio.create_task(reader.read(1))
             try:
-                reply = await runner.run_job(request)
+                done, _ = await asyncio.wait({job, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+                if job not in done:
+                    job.cancel()
+                    await asyncio.gather(job, return_exceptions=True)
+                    reply = _error("cancelled", "client disconnected")
+                else:
+                    reply = await job
             except Exception:
                 log.exception("unhandled error running job")
                 reply = _error("worker_failed", "internal error")
+            finally:
+                if not job.done() and not job.cancelling():
+                    job.cancel()
+                disconnected.cancel()
+                await asyncio.gather(job, disconnected, return_exceptions=True)
             await _send_reply(writer, reply)
         finally:
             active -= 1
