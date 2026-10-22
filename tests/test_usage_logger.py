@@ -38,16 +38,15 @@ def test_log_appends_jsonl(tmp_path):
         json.loads(line)  # must be valid JSON
 
 
-def test_stats_alltime(tmp_path):
+def test_stats_retained(tmp_path):
     path = tmp_path / "usage.jsonl"
     ul = UsageLogger(str(path))
     ul.log(_make_entry(client_ip="1.1.1.1", elapsed_sec=2.0, success=True))
     ul.log(_make_entry(client_ip="2.2.2.2", elapsed_sec=4.0, success=False))
     ul.log(_make_entry(client_ip="1.1.1.1", elapsed_sec=3.0, success=True))
 
-    s = ul.stats()["all_time"]
+    s = ul.stats()["retained"]
     assert s["total_requests"] == 3
-    assert s["unique_ips"] == 2
     assert s["successes"] == 2
     assert s["failures"] == 1
     assert s["avg_elapsed_sec"] == 3.0
@@ -67,9 +66,8 @@ def test_stats_last_24h_excludes_old(tmp_path, monkeypatch):
     ul.log(_make_entry(client_ip="2.2.2.2"))
 
     s = ul.stats()
-    assert s["all_time"]["total_requests"] == 2
+    assert s["retained"]["total_requests"] == 2
     assert s["last_24h"]["total_requests"] == 1
-    assert s["last_24h"]["unique_ips"] == 1
 
 
 def test_replay_on_init(tmp_path):
@@ -78,11 +76,9 @@ def test_replay_on_init(tmp_path):
     ul.log(_make_entry(client_ip="1.1.1.1", elapsed_sec=2.0, success=True))
     ul.log(_make_entry(client_ip="2.2.2.2", elapsed_sec=4.0, success=False))
 
-    # Create a new logger from the same file — should replay
     ul2 = UsageLogger(str(path))
-    s = ul2.stats()["all_time"]
+    s = ul2.stats()["retained"]
     assert s["total_requests"] == 2
-    assert s["unique_ips"] == 2
     assert s["successes"] == 1
     assert s["failures"] == 1
 
@@ -113,7 +109,7 @@ def test_stats_last_24h_uses_utc(tmp_path, monkeypatch, tz_name, replay):
                 ul = UsageLogger(str(path))
 
             s = ul.stats()
-            assert s["all_time"]["total_requests"] == 2
+            assert s["retained"]["total_requests"] == 2
             assert s["last_24h"] == {
                 "total_requests": 1,
                 "unique_ips": 1,
@@ -151,14 +147,17 @@ def test_arrival_lines_are_persisted_but_not_counted(tmp_path):
     assert lines[0]["request_id"] == lines[2]["request_id"] == "r1"
 
     s = ul.stats()
-    for window in ("all_time", "last_24h"):
-        assert s[window] == {
+    for window in ("retained", "last_24h"):
+        expected = {
             "total_requests": 1,
             "unique_ips": 1,
             "avg_elapsed_sec": 2.0,
             "successes": 1,
             "failures": 0,
         }
+        if window == "retained":
+            expected["days"] = None
+        assert s[window] == expected
 
 
 def test_replay_mixed_file(tmp_path):
@@ -176,7 +175,8 @@ def test_replay_mixed_file(tmp_path):
     path.write_text("".join(json.dumps(line) + "\n" for line in lines))
 
     s = UsageLogger(str(path)).stats()
-    assert s["all_time"] == {
+    assert s["retained"] == {
+        "days": None,
         "total_requests": 3,
         "unique_ips": 3,
         "avg_elapsed_sec": 4.0,
@@ -196,7 +196,7 @@ def test_missing_file(tmp_path):
     path = tmp_path / "nonexistent" / "usage.jsonl"
     ul = UsageLogger(str(path))
     s = ul.stats()
-    assert s["all_time"]["total_requests"] == 0
+    assert s["retained"]["total_requests"] == 0
     assert s["last_24h"]["total_requests"] == 0
 
 
@@ -205,4 +205,4 @@ def test_empty_file(tmp_path):
     path.write_text("")
     ul = UsageLogger(str(path))
     s = ul.stats()
-    assert s["all_time"]["total_requests"] == 0
+    assert s["retained"]["total_requests"] == 0

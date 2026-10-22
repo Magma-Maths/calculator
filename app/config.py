@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     # Submission logging (full code, for abuse investigation). Off unless set.
     submission_log_file: str = ""
+    log_retention_days: int | None = Field(default=None, gt=0)
 
     @property
     def allowed_origins_list(self) -> list[str]:

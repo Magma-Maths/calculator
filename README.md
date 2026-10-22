@@ -93,6 +93,41 @@ Like `/health`, this endpoint has no rate limit or usage log entry and follows `
 {"calculator": "abc123", "magma": "2.29-4"}
 ```
 
+### GET /info
+
+Returns `schema_version: 1`, `limits`, and `retention`, with `Cache-Control: no-store` and the same CORS policy as `/version`.
+It consumes no job slot, runs no computation, and does not count toward rate limits or usage statistics.
+
+Every field below is present. `null` means unknown or unconfirmed, never unlimited.
+
+| Field in `limits` | Meaning |
+| --- | --- |
+| `wall_time_seconds`, `cpu_time_seconds` | Configured execution ceilings, confirmed against the supervisor's accepted timeout |
+| `guest_memory_bytes` | Enforced guest RAM, including the guest OS and agent |
+| `input_bytes`, `output_bytes` | UTF-8 input and captured stdout caps, in bytes |
+| `requests_per_minute`, `requests_per_hour` | Rolling per-IP attempt limits, per API process; zero rejects every attempt |
+| `max_concurrent_per_ip` | Simultaneous running jobs per IP, from `MAX_CONCURRENT_PER_IP` |
+| `queue_capacity` | Always `0`: busy jobs are rejected without a waiting queue |
+
+Memory and timeout ceilings come from a small read-only supervisor operation.
+The API sends it at most once every 10 seconds and reuses the reply, or the failure, in between.
+An unreachable or older supervisor leaves the affected fields `null`.
+A timeout above the supervisor's ceiling, or an output cap above its accepted maximum, also reports `null` for that field.
+`input_bytes` remains available because the API enforces it directly.
+JSON escaping and the worker's frame size can reject some inputs below this cap.
+The stdout cap includes the Magma banner and footer; truncation does not stop computation.
+Ceilings describe limits, not guaranteed computing time or available heap space.
+
+The `retention` fields describe logging policy:
+
+- `code_logged`: whether `SUBMISSION_LOG_FILE` is configured.
+- `ip_logged`: `true`, because request metadata also goes to the service log, even when file logging is disabled.
+- `submission_min_days`: `LOG_RETENTION_DAYS` after a successful cleanup of both file logs, or `null` if unset, cleanup failed, or code logging is disabled.
+
+Logging booleans do not guarantee that every write succeeds.
+Days mean 24 hours. Backups and separately managed service logs may retain data longer.
+See [record retention](#record-retention) for cleanup scope and timing.
+
 ### GET /health/deep
 
 Runs `print 1+1;` through the configured executor and, if `HEALTH_STATUS_FILE` is set, includes problems reported by host checks. Results are cached for 60 seconds, and the endpoint does not count against the rate limit. If all slots are busy, it returns `busy` without running a probe.
@@ -107,22 +142,33 @@ Runs `print 1+1;` through the configured executor and, if `HEALTH_STATUS_FILE` i
 
 ### GET /stats
 
-Returns all-time and last-24-hour usage statistics from `USAGE_LOG_FILE`, a JSON-lines file. An admitted `/execute` request writes an `"event": "start"` line with its timestamp, client IP, and input size, then an `"event": "end"` line on completion. Both share a `request_id`; only completion lines count toward statistics. Each line is also printed as JSON to the service log.
+Returns usage statistics for the retained window and the last 24 hours.
+The service replays completion records from `USAGE_LOG_FILE` at startup and updates both windows as requests complete.
+An admitted `/execute` request writes an `"event": "start"` line with its timestamp, client IP, and input size, then an `"event": "end"` line on completion.
+Both share a `request_id`; only completion lines count toward statistics. Each line is also printed as JSON to the service log.
+
+`retained.days` is `LOG_RETENTION_DAYS`; records older than that window drop out of statistics, including unique-IP counts.
+With retention unset, `days` is `null` and the retained window is unbounded, covering every valid completion in the file.
+`last_24h` covers the last 24 hours within the retained records. Both windows include records exactly at their cutoff.
+Each window reports its own `unique_ips` count; no IP list is exposed.
+The service keeps timestamp, elapsed time, success, and IP in memory only for retained completions.
+It discards expired completions on logging, statistics reads, and periodic cleanup, even if a file rewrite fails.
 
 Completion lines include HTTP `status` and a `reason`: `completed`, `busy`, `unavailable`, `too_large`, `error`, or `disconnected`. A disconnected request records status 499. A request rejected before admission prints an `"event": "rejected"` line with `status` and a reason (`too_large`, `rate_limited`, `ip_busy`, or `busy`); it does not change `USAGE_LOG_FILE` or the statistics.
 
 ```json
 {
-  "all_time": {
+  "retained": {
+    "days": 90,
     "total_requests": 1234,
-    "unique_ips": 56,
+    "unique_ips": 123,
     "avg_elapsed_sec": 2.3,
     "successes": 1200,
     "failures": 34
   },
   "last_24h": {
     "total_requests": 42,
-    "unique_ips": 10,
+    "unique_ips": 12,
     "avg_elapsed_sec": 1.8,
     "successes": 40,
     "failures": 2
@@ -154,6 +200,8 @@ The service reads these environment variables:
 | `RATE_LIMIT_PER_HOUR` | 200 | Requests per IP per hour |
 | `ALLOWED_ORIGIN` | `*` | CORS origins (`*` for all, or comma-separated list) |
 | `USAGE_LOG_FILE` | `/data/usage.jsonl` | Path for persistent usage log (JSON lines) |
+| `SUBMISSION_LOG_FILE` | empty | Optional path for submitted source and request metadata |
+| `LOG_RETENTION_DAYS` | unset | Positive integer days to retain both raw file logs; unset disables automatic deletion |
 
 ## Security
 
@@ -165,7 +213,43 @@ Each free slot has a [warm guest](FIRECRACKER.md#warm-pool), booted and connecte
 
 Set `SUBMISSION_LOG_FILE` to enable a mode-0600 log of requests that reach the executor. Each admitted request records its code and client IP before execution, then a completion record with the same `request_id`. The outcome includes `exit_code`, `timed_out`, `seccomp_killed`, elapsed and CPU time, memory, and output sizes.
 
-Requests rejected before execution include 413, 429, and 503 when no local slot is free. The service log prints an `"event": "rejected"` line. The submission log stores only client IP, reason, and input size; these requests omit code and have no completion record. A worker-side rejection for an oversized framed request is recorded with its code. The service does not read this file; it is local, off by default, and the operator manages rotation and deletion. A write error does not stop later writes; a startup failure disables logging for that process.
+Requests rejected before execution include 413, 429, and 503 when no local slot is free. The service log prints an `"event": "rejected"` line. The submission log stores only client IP, reason, and input size; these requests omit code and have no completion record. A worker-side rejection for an oversized framed request is recorded with its code. The file is local and off by default. A write error does not stop later writes; a startup failure disables logging for that process.
+
+### Record retention
+
+Set `LOG_RETENTION_DAYS=N` to expire raw records from both `USAGE_LOG_FILE` and `SUBMISSION_LOG_FILE` after N days.
+The service streams and atomically rewrites these files at startup and every five minutes, including during idle periods.
+Each sweep removes records older than N days, along with malformed records or records without a valid UTC timestamp.
+Recent records remain, with mode 0600. Cleanup and appends share a lock; appends wait while their file is rewritten.
+Logging and statistics reads wait in worker threads so other endpoints remain responsive during rewrites.
+Each sweep takes time proportional to the log size and needs space for one rewritten file.
+Failed sweeps report `submission_min_days: null` and retry at the next interval.
+Unconfigured retention reports `null` and leaves raw file deletion to the operator.
+
+Standard numbered and date-suffixed archives in the same directory also receive cleanup:
+`submissions.jsonl.1`, `submissions.jsonl.2.gz`, and `submissions.jsonl-20261016.gz`, for example.
+Cleanup removes temporary files left by interrupted sweeps.
+Give the service ownership of the log directory and access to existing archives.
+Remove external rotation and deletion rules for these files when enabling service retention.
+Rotation by rename between sweeps remains supported; concurrent external rotation can make a sweep fail and retry.
+Archives in other directories or with custom names require separate operator cleanup.
+
+Statistics use the active usage file, with no separate persistent store.
+Only completions with a valid UTC timestamp count; arrival records and malformed lines do not.
+Rotated archives receive cleanup but are not replayed into statistics.
+Renaming or deleting the active file can therefore reduce totals after a restart.
+An empty `USAGE_LOG_FILE` disables that raw file; statistics then cover only completions observed by the current process.
+A failed raw write still counts in that process but cannot be recovered after restart.
+
+If cleanup fails, `/info` reports `submission_min_days: null` until a later sweep succeeds.
+`/stats` continues to apply its configured window in memory; `retained.days` describes that window, not successful disk deletion.
+With retention unset, raw files and retained statistics have no automatic age limit.
+Memory use grows with the number of retained completions, and each statistics read scans them.
+Existing aggregate database files are unused and can be removed by the operator.
+
+Run one API process per log directory so its append locks cover every writer.
+This policy covers the two file logs and their standard archives.
+Configure retention for service stdout, proxy logs, and backups separately.
 
 ## Development
 

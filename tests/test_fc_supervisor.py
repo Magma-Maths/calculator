@@ -285,6 +285,40 @@ def test_unix_socket_server_roundtrip(config):
     assert asyncio.run(run())["stdout"] == "2\n"
 
 
+def test_metadata_answers_while_every_slot_runs_a_job(config):
+    host = FakeHost(config["jail_base"], agent_delay=0.5)
+
+    async def exchange(request):
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        try:
+            await protocol.write_frame(writer, request)
+            return await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
+        finally:
+            await protocol.close_writer(writer)
+
+    async def run():
+        runner = supervisor.Runner(config, host.systemctl, host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        try:
+            jobs = [asyncio.create_task(exchange(_request())) for _ in config["slots"]]
+            await _until(lambda: len(host.connected) == len(jobs))
+            calls = list(host.calls)
+            reply = await exchange({"operation": "metadata"})
+            assert reply == {
+                "guest_memory_bytes": 512 * 1024**2,
+                "max_timeout_seconds": 300,
+                "max_output_bytes": protocol.MAX_REPLY_BYTES // 2,
+            }
+            assert not any(job.done() for job in jobs)
+            assert host.calls == calls
+            assert [r["exit_code"] for r in await asyncio.gather(*jobs)] == [0, 0]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+
+
 def test_run_job_passes_seccomp_fields_through(config):
     agent_reply = {
         "stdout": "", "stderr": "", "exit_code": -1, "timed_out": False, "truncated": False,

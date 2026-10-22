@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -23,6 +23,7 @@ from app.executor import (
 )
 from app.parser import TRUNCATION_WARNING, parse_magma_output, parse_stderr_warnings
 from app.ratelimit import RateLimiter
+from app.log_retention import LogRetention
 from app.submission_logger import SubmissionLogger
 from app.usage_logger import UsageLogger
 
@@ -36,8 +37,10 @@ semaphore = asyncio.Semaphore(settings.max_concurrent)
 # Counts executing submissions; health probes share the semaphore but are excluded.
 _in_flight = 0
 _running_by_ip: dict[str, int] = {}
-usage_logger = UsageLogger(settings.usage_log_file)
+usage_logger = UsageLogger(settings.usage_log_file, settings.log_retention_days)
 submission_logger = SubmissionLogger(settings.submission_log_file)
+retention: LogRetention | None = None
+_RETENTION_INTERVAL_SECONDS = 300
 
 logger = logging.getLogger("calculator")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -45,16 +48,23 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global retention
+    retention = LogRetention(settings.log_retention_days, usage_logger, submission_logger)
+    await asyncio.to_thread(retention.cleanup)
     task = asyncio.create_task(_periodic_cleanup())
-    yield
-    task.cancel()
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def _periodic_cleanup():
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(_RETENTION_INTERVAL_SECONDS)
         rate_limiter.cleanup()
-        usage_logger.prune_24h()
+        await asyncio.to_thread(retention.cleanup)
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -122,10 +132,64 @@ async def version():
 
 @app.get("/stats")
 async def stats():
-    return usage_logger.stats()
+    return await asyncio.to_thread(usage_logger.stats)
 
 
-def _reject(status: int, reason: str, message: str, client_ip: str, input_size: int, headers=None):
+@app.get("/info")
+async def info():
+    metadata = await executor.supervisor_metadata(settings)
+
+    def positive_int(value):
+        return value if type(value) is int and value > 0 else None
+
+    ceiling = positive_int(metadata.get("max_timeout_seconds"))
+    output_ceiling = positive_int(metadata.get("max_output_bytes"))
+    wall = positive_int(settings.magma_timeout)
+    cpu = positive_int(settings.magma_cpu_timeout)
+    output = positive_int(settings.magma_output_bytes)
+    return JSONResponse(headers={"Cache-Control": "no-store"}, content={
+        "schema_version": 1,
+        "limits": {
+            "wall_time_seconds": wall if ceiling and wall and wall <= ceiling else None,
+            "cpu_time_seconds": cpu if ceiling and cpu and cpu <= ceiling else None,
+            "guest_memory_bytes": positive_int(metadata.get("guest_memory_bytes")),
+            "input_bytes": positive_int(settings.magma_input_bytes),
+            "output_bytes": output if output_ceiling and output and output <= output_ceiling else None,
+            "requests_per_minute": settings.rate_limit_per_minute if settings.rate_limit_per_minute >= 0 else None,
+            "requests_per_hour": settings.rate_limit_per_hour if settings.rate_limit_per_hour >= 0 else None,
+            "max_concurrent_per_ip": positive_int(settings.max_concurrent_per_ip),
+            "queue_capacity": 0,
+        },
+        "retention": {
+            "code_logged": bool(settings.submission_log_file),
+            "ip_logged": True,
+            "submission_min_days": (
+                retention.days if settings.submission_log_file and retention and retention.succeeded else None
+            ),
+        },
+    })
+
+
+async def _log_event(entry, write_submission, *args, **kwargs):
+    def write():
+        if entry is not None:
+            usage_logger.log(entry)
+        write_submission(*args, **kwargs)
+
+    task = asyncio.create_task(asyncio.to_thread(write))
+    cancelled = False
+    # Threads keep writing after cancellation; finish before a later event.
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _reject(status: int, reason: str, message: str, client_ip: str, input_size: int, headers=None):
     """Answer a request turned away before admission; logged only, so /stats is unchanged."""
     logger.info(json.dumps({
         "event": "rejected",
@@ -137,7 +201,7 @@ def _reject(status: int, reason: str, message: str, client_ip: str, input_size: 
     }))
     # Metadata only, never code: code is kept once a request reaches the
     # executor; the local no-free-slot 503, 429, and the 50 KB 413 never do.
-    submission_logger.log_rejected(uuid.uuid4().hex, client_ip, reason, input_size)
+    await _log_event(None, submission_logger.log_rejected, uuid.uuid4().hex, client_ip, reason, input_size)
     return JSONResponse(status_code=status, content={"error": message}, headers=headers)
 
 
@@ -157,20 +221,26 @@ async def execute(req: ExecuteRequest, request: Request):
 
     # Check input size
     if len(req.code.encode("utf-8")) > settings.magma_input_bytes:
-        return _reject(413, "too_large", "Input too large", client_ip, len(req.code))
+        return await _reject(413, "too_large", "Input too large", client_ip, len(req.code))
 
     # Check rate limit
     if not rate_limiter.is_allowed(client_ip):
-        return _reject(429, "rate_limited", "Rate limit exceeded", client_ip, len(req.code),
+        return await _reject(429, "rate_limited", "Rate limit exceeded", client_ip, len(req.code),
                        headers={"Retry-After": "60"})
 
     if _running_by_ip.get(client_ip, 0) >= settings.max_concurrent_per_ip:
-        return _reject(429, "ip_busy", "Too many simultaneous jobs from this IP", client_ip, len(req.code))
+        return await _reject(429, "ip_busy", "Too many simultaneous jobs from this IP", client_ip, len(req.code))
 
     # Try to acquire concurrency slot without blocking
-    acquired = not semaphore.locked()
-    if not acquired:
-        return _reject(503, "busy", "All execution slots busy", client_ip, len(req.code))
+    if semaphore.locked():
+        return await _reject(503, "busy", "All execution slots busy", client_ip, len(req.code))
+    # acquire() does not yield on a free semaphore, so both reservations are in
+    # place before the awaited arrival write lets other requests in.
+    await semaphore.acquire()
+    _running_by_ip[client_ip] = _running_by_ip.get(client_ip, 0) + 1
+    # Other submissions executing when this one was admitted.
+    in_flight_at_admission = _in_flight
+    _in_flight += 1
 
     # Persisted before execution so that a run which never returns still
     # leaves a record; the completion line below carries the same request_id.
@@ -183,11 +253,6 @@ async def execute(req: ExecuteRequest, request: Request):
         "input_size": len(req.code),
     }
     logger.info(json.dumps(arrival))
-    usage_logger.log(arrival)
-    submission_logger.log_arrival(request_id, client_ip, req.code)
-    # Other requests already holding a slot when this one was admitted: a
-    # cheap concurrency signal for the completion line below.
-    in_flight_at_admission = _in_flight
 
     # An exception leaves these defaults in place, so both logs still
     # record exactly one outcome for every admitted request: never just a
@@ -195,17 +260,14 @@ async def execute(req: ExecuteRequest, request: Request):
     outcome = {"status": 500, "reason": "error", "memory_used": None, "success": False, "warnings": []}
     submission_outcome = {"outcome": "error"}
     try:
-        async with semaphore:
-            _in_flight += 1
-            _running_by_ip[client_ip] = _running_by_ip.get(client_ip, 0) + 1
-            try:
-                return await _run_connected(req.code, request, outcome, submission_outcome)
-            finally:
-                _in_flight -= 1
-                _running_by_ip[client_ip] -= 1
-                if not _running_by_ip[client_ip]:
-                    del _running_by_ip[client_ip]
+        await _log_event(arrival, submission_logger.log_arrival, request_id, client_ip, req.code)
+        return await _run_connected(req.code, request, outcome, submission_outcome)
     finally:
+        _in_flight -= 1
+        _running_by_ip[client_ip] -= 1
+        if not _running_by_ip[client_ip]:
+            del _running_by_ip[client_ip]
+        semaphore.release()
         elapsed = round(time.time() - start_time, 3)
         completion = {
             "event": "end",
@@ -217,8 +279,7 @@ async def execute(req: ExecuteRequest, request: Request):
             **outcome,
         }
         logger.info(json.dumps(completion))
-        usage_logger.log(completion)
-        submission_logger.log_completion(
+        await _log_event(completion, submission_logger.log_completion,
             request_id, elapsed=elapsed, in_flight_at_admission=in_flight_at_admission, **submission_outcome,
         )
 

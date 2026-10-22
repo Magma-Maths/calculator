@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+from app.log_retention import prune_records
+
 logger = logging.getLogger("calculator")
 
 
@@ -54,6 +56,10 @@ class SubmissionLogger:
                     os.close(fd)
             except OSError:
                 logger.warning("Cannot write to submission log: %s", self._path)
+
+    def cleanup(self, cutoff: float):
+        with self._lock:
+            prune_records(self._path, cutoff)
 
     def log_arrival(self, request_id: str, client_ip: str, code: str) -> None:
         """Written before execution starts, so a run that kills or hangs

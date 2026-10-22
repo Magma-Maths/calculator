@@ -45,7 +45,8 @@ def _parse_readme_defaults():
     defaults = {}
     for var, val in rows:
         # Strip backticks and surrounding whitespace
-        defaults[var] = val.strip().strip("`")
+        value = val.strip().strip("`")
+        defaults[var] = {"empty": "", "unset": "None"}.get(value, value)
     return defaults
 
 

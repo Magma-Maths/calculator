@@ -1,147 +1,104 @@
-import calendar
+import heapq
 import json
 import logging
 import threading
 import time
-from collections import deque
 from pathlib import Path
+
+from app.log_retention import parse_timestamp, prune_records
 
 logger = logging.getLogger("calculator")
 
 
 class UsageLogger:
-    def __init__(self, path: str):
-        self._path = Path(path)
+    def __init__(self, path: str, retention_days: int | None = None):
+        self._path = Path(path) if path else None
+        self._days = retention_days
         self._lock = threading.Lock()
-        self._writable = True
-
-        # All-time counters
-        self.total_requests = 0
-        self.unique_ips: set[str] = set()
-        self.total_elapsed_sec = 0.0
-        self.successes = 0
-        self.failures = 0
-
-        # Last-24h entries: (timestamp, elapsed_sec, success, client_ip)
-        self._recent: deque[tuple[float, float, bool, str]] = deque()
-
+        self._records: list[tuple[float, float, bool, str]] = []
+        self._writable = self._path is not None
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if self._path is not None:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             self._writable = False
             logger.warning("Cannot create usage log directory: %s", self._path.parent)
         self._replay()
+        self._prune()
 
     def _replay(self):
-        if not self._path.exists():
+        if self._path is None or not self._path.exists():
             return
-        cutoff = time.time() - 86400
         with open(self._path) as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
                 try:
                     entry = json.loads(line)
-                except json.JSONDecodeError:
+                except ValueError:
                     continue
-                if self._is_completion(entry):
-                    self._count(entry, cutoff)
+                if isinstance(entry, dict) and self._is_completion(entry):
+                    self._count(entry)
 
     @staticmethod
     def _is_completion(entry: dict) -> bool:
-        # Arrival lines are event "start". Files written before arrival
-        # records existed carry no marker at all, and every line is a completion.
+        # Legacy records have no event marker and describe completed requests.
         return entry.get("event", "end") == "end"
 
-    def _count(self, entry: dict, cutoff: float = 0.0):
-        self._update_alltime(entry)
-        ts = self._parse_timestamp(entry.get("timestamp", ""))
-        if ts and ts >= cutoff:
-            self._recent.append((
-                ts,
-                entry.get("elapsed_sec", 0.0),
-                entry.get("success", False),
-                entry.get("client_ip", ""),
-            ))
+    def _count(self, entry: dict):
+        timestamp = parse_timestamp(entry.get("timestamp"))
+        if timestamp is None or (self._days is not None and timestamp < time.time() - self._days * 86400):
+            return
+        heapq.heappush(self._records, (
+            timestamp, entry.get("elapsed_sec", 0.0),
+            bool(entry.get("success", False)), entry.get("client_ip", ""),
+        ))
 
-    @staticmethod
-    def _parse_timestamp(ts_str: str) -> float | None:
-        try:
-            return calendar.timegm(time.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ"))
-        except (ValueError, OverflowError):
-            return None
-
-    def _update_alltime(self, entry: dict):
-        self.total_requests += 1
-        ip = entry.get("client_ip", "")
-        if ip:
-            self.unique_ips.add(ip)
-        self.total_elapsed_sec += entry.get("elapsed_sec", 0.0)
-        if entry.get("success", False):
-            self.successes += 1
-        else:
-            self.failures += 1
+    def _prune(self):
+        if self._days is not None:
+            cutoff = time.time() - self._days * 86400
+            while self._records and self._records[0][0] < cutoff:
+                heapq.heappop(self._records)
 
     def log(self, entry: dict):
         line = json.dumps(entry, default=str)
         with self._lock:
+            if self._is_completion(entry):
+                self._count(entry)
+            self._prune()
             if self._writable:
                 try:
                     with open(self._path, "a") as f:
                         f.write(line + "\n")
                 except OSError:
-                    self._writable = False
                     logger.warning("Cannot write to usage log: %s", self._path)
-            if self._is_completion(entry):
-                self._count(entry)
 
-    def prune_24h(self):
-        cutoff = time.time() - 86400
+    def cleanup(self, cutoff: float):
         with self._lock:
-            while self._recent and self._recent[0][0] < cutoff:
-                self._recent.popleft()
+            self._prune()
+            prune_records(self._path, cutoff)
+
+    @staticmethod
+    def _stats_row(records) -> dict:
+        requests, elapsed, successes = 0, 0.0, 0
+        ips = set()
+        for _, duration, success, ip in records:
+            requests += 1
+            elapsed += duration
+            successes += success
+            if ip:
+                ips.add(ip)
+        return {
+            "total_requests": requests,
+            "unique_ips": len(ips),
+            "avg_elapsed_sec": round(elapsed / requests, 3) if requests else 0.0,
+            "successes": successes,
+            "failures": requests - successes,
+        }
 
     def stats(self) -> dict:
-        self.prune_24h()
         with self._lock:
-            all_avg = (
-                round(self.total_elapsed_sec / self.total_requests, 3)
-                if self.total_requests else 0.0
-            )
-
-            recent_requests = len(self._recent)
-            recent_ips: set[str] = set()
-            recent_elapsed = 0.0
-            recent_successes = 0
-            recent_failures = 0
-            for _, elapsed, success, ip in self._recent:
-                if ip:
-                    recent_ips.add(ip)
-                recent_elapsed += elapsed
-                if success:
-                    recent_successes += 1
-                else:
-                    recent_failures += 1
-
-            recent_avg = (
-                round(recent_elapsed / recent_requests, 3)
-                if recent_requests else 0.0
-            )
-
-        return {
-            "all_time": {
-                "total_requests": self.total_requests,
-                "unique_ips": len(self.unique_ips),
-                "avg_elapsed_sec": all_avg,
-                "successes": self.successes,
-                "failures": self.failures,
-            },
-            "last_24h": {
-                "total_requests": recent_requests,
-                "unique_ips": len(recent_ips),
-                "avg_elapsed_sec": recent_avg,
-                "successes": recent_successes,
-                "failures": recent_failures,
-            },
-        }
+            self._prune()
+            cutoff = time.time() - 86400
+            return {
+                "retained": {"days": self._days, **self._stats_row(self._records)},
+                "last_24h": self._stats_row(record for record in self._records if record[0] >= cutoff),
+            }
