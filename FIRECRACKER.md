@@ -193,47 +193,15 @@ chown root:firecracker /srv/magma-fc/images/{vmlinux,rootfs.ext4,magma.ext4}
 chmod 0640 /srv/magma-fc/images/{vmlinux,rootfs.ext4,magma.ext4}
 ```
 
-The three commands also need host Python 3.11 or later. Add
-`--force` before the paths to rebuild explicitly.
+The three builders need host Python 3.11 or later.
+Each successful run prints `{"changed":true}` or `{"changed":false}` on stdout.
+Restart services only after a successful run reports `changed:true`.
+A failed build exits nonzero and keeps the previous image.
 
-Each successful command prints one JSON object on stdout:
-`{"changed":true}` after publishing a build, or `{"changed":false}` when
-its output is current. Build progress goes to stderr. Errors exit nonzero
-without a success object and preserve the preceding complete artifact.
-Restart services only after a successful result with `changed:true`.
-
-Each output has a builder-owned `<output>.build-stamp.json` containing its
-input fingerprint and the output's device, inode, size and modification
-time. A missing or empty output, changed output metadata, or a missing or
-invalid stamp triggers a build. An unchanged call leaves both files
-untouched and runs no downloads, compilation or packing.
-The stamp must stay beside its output; moving an image alone requires a
-rebuild at the new path. Callers may change output ownership and mode.
-A same-size output edit with restored modification time requires `--force`.
-
-Freshness includes each builder's recipe and shared helper. Kernel inputs
-include both version settings and the optional fragment's contents. Rootfs
-inputs come from `firecracker/build/rootfs-files.tsv`, which also controls
-installed paths and modes, plus the optional site hook's contents. Omitting
-a previously supplied fragment or hook rebuilds without it. Unrelated API
-source changes do not rebuild images.
-
-The Magma tree includes hidden files, permissions, ownership, symlink
-targets and regular files' sizes and modification times. Tree traversal
-does not follow directory symlinks. A same-size content edit with restored
-timestamps requires `--force`.
-
-Use `--force` after package repository, toolchain or filesystem-tool updates,
-or changes behind the same remote version or tag. Kernel rebuilds extract
-clean sources from the cached version archive; delete that archive as well
-to download it again. Keep source trees stable during builds.
-
-Builds use private temporary paths and replace the complete output before
-replacing its stamp. Catchable publication errors restore the old artifact.
-After an abrupt stop between replacements, a mismatched stamp triggers a
-rebuild. These replacements do not guarantee durability across power loss.
-Calls sharing an output or kernel work directory fail if another build
-holds its lock. Keep the adjacent `.build.lock` files in place.
+Pass `--force` before the paths after toolchain updates, or after editing an
+installed Magma tree in place. Also use it for new guest packages from the
+Debian repository, or a change published under the same remote version or tag.
+Keep each image's `.build-stamp.json` and `.build.lock` files beside it.
 
 `build-kernel.sh` fetches Firecracker's CI kernel configuration and builds
 `vmlinux`. It needs a kernel build toolchain. Defaults are Linux 6.1.186
