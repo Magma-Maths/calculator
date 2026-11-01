@@ -1,5 +1,6 @@
 import fcntl
 import json
+import lzma
 import os
 import re
 import shutil
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from .test_fc_hooks import executable, tools
+from .test_fc_hooks import KERNEL_CONFIG, executable, pinned_kernel_builder, tools
 
 # mkdir, mount and chmod handle these themselves inside any Debian minbase tree.
 STANDARD_MINBASE_DIRS = {"/proc", "/sys", "/tmp", "/run"}
@@ -92,7 +93,7 @@ def builder(request, tmp_path, tools):
         change = tmp_path / "extra.config"
         change.write_text("CONFIG_FEATURE=y\n")
         args = [str(output), str(work), str(change)]
-        script = "build-kernel.sh"
+        script = pinned_kernel_builder(tmp_path, work / "linux-6.1.186.tar.xz")
     elif kind == "rootfs":
         shutil.copytree(ROOT / "firecracker", source / "firecracker")
         change = source / "firecracker/protocol.py"
@@ -103,6 +104,99 @@ def builder(request, tmp_path, tools):
         args = [str(source), str(output)]
         script = "build-magma-image.sh"
     return kind, [str(ROOT / "firecracker/build" / script), *args], env, output, change, count
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+@pytest.mark.parametrize("cached", [False, True], ids=["downloaded", "cached"])
+@pytest.mark.parametrize("damaged", ["archive", "config"])
+def test_kernel_rejects_changed_input_before_extraction(builder, tmp_path, cached, damaged):
+    _, args, env, output, _, count = builder
+    work = Path(args[2])
+    archive = work / "linux-6.1.186.tar.xz"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    shutil.copy2(archive, downloads / archive.name)
+    config = downloads / "microvm-kernel-ci-x86_64-6.1-v1.17.0.config"
+    config.write_text(KERNEL_CONFIG)
+    target = downloads / archive.name if damaged == "archive" else config
+    if damaged == "archive":
+        target.write_bytes(lzma.compress(lzma.decompress(target.read_bytes()), preset=0))
+    else:
+        target.write_bytes(target.read_bytes() + b"CONFIG_CHANGED=y\n")
+    if cached:
+        shutil.copy2(downloads / archive.name, archive)
+        shutil.copy2(config, work / config.name)
+    else:
+        archive.unlink()
+    env["DOWNLOADS"] = str(downloads)
+    directory = Path(env["PATH"].split(os.pathsep)[0])
+    executable(directory / "curl", 'while [ "$1" != -o ]; do shift; done\ncase "$2" in\n*.tar.xz*) input=linux-6.1.186.tar.xz;;\n*) input=microvm-kernel-ci-x86_64-6.1-v1.17.0.config;;\nesac\ncp "$DOWNLOADS/$input" "$2"\n')
+    extracted = tmp_path / "extracted"
+    env["EXTRACTED"] = str(extracted)
+    tar = shutil.which("tar")
+    executable(directory / "tar", f'touch "$EXTRACTED"\nexec "{tar}" "$@"\n')
+    output.write_bytes(b"previous kernel")
+    stamp = Path(str(output) + ".build-stamp.json")
+    stamp.write_bytes(b"previous stamp")
+    result = invoke(builder, "--force", ok=False)
+    assert "checksum" in result.stderr.lower() or "sha256" in result.stderr.lower()
+    assert not extracted.exists()
+    assert not count.exists()
+    assert output.read_bytes() == b"previous kernel"
+    assert stamp.read_bytes() == b"previous stamp"
+    assert not list(work.glob("*.part"))
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+def test_kernel_rechecks_cached_input_on_rebuild(builder):
+    _, args, _, output, change, count = builder
+    invoke(builder)
+    old = output.read_bytes()
+    archive = Path(args[2]) / "linux-6.1.186.tar.xz"
+    archive.write_bytes(lzma.compress(lzma.decompress(archive.read_bytes()), preset=0))
+    change.write_bytes(change.read_bytes() + b"\n")
+    invoke(builder, ok=False)
+    assert output.read_bytes() == old
+    assert count.read_text().splitlines() == ["build"]
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+@pytest.mark.parametrize("version", ["KERNEL_VERSION", "FIRECRACKER_TAG"])
+def test_kernel_rejects_unpinned_versions(builder, version):
+    _, _, env, output, _, count = builder
+    env[version] = "unreviewed"
+    result = invoke(builder, ok=False)
+    assert "must match reviewed" in result.stderr
+    assert not output.exists()
+    assert not count.exists()
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+def test_kernel_pin_change_invalidates_output(builder):
+    _, args, _, output, _, count = builder
+    invoke(builder)
+    pins = Path(args[0]).with_name("kernel-inputs.sh")
+    pins.write_text(re.sub(r"config_sha256=.{64}", "config_sha256=" + "0" * 64, pins.read_text()))
+    old = output.read_bytes()
+    invoke(builder, ok=False)
+    assert output.read_bytes() == old
+    assert count.read_text().splitlines() == ["build"]
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+def test_kernel_accepts_matching_downloads_and_cache(builder, tmp_path):
+    _, args, env, output, _, count = builder
+    archive = Path(args[2]) / "linux-6.1.186.tar.xz"
+    download = tmp_path / "download.tar.xz"
+    archive.rename(download)
+    directory = Path(env["PATH"].split(os.pathsep)[0])
+    env["ARCHIVE_DOWNLOAD"] = str(download)
+    executable(directory / "curl", 'while [ "$1" != -o ]; do shift; done\ncase "$2" in\n*.tar.xz*) cp "$ARCHIVE_DOWNLOAD" "$2";;\n*) printf "CONFIG_SECCOMP_FILTER=y\\nCONFIG_AUDIT=y\\n" > "$2";;\nesac\n')
+    assert invoke(builder) == {"changed": True}
+    executable(directory / "curl", 'exit 42\n')
+    assert invoke(builder, "--force") == {"changed": True}
+    assert output.read_text() == KERNEL_CONFIG + "CONFIG_FEATURE=y\n"
+    assert count.read_text().splitlines() == ["build", "build"]
 
 
 def invoke(builder, *flags, ok=True):
@@ -197,7 +291,7 @@ def test_signal_stops_recipe_and_cleans_staging(builder, tmp_path, interrupt):
     stamp = Path(str(output) + ".build-stamp.json")
     old_output, old_stamp = output.read_bytes(), stamp.read_bytes()
     copied = tmp_path / "build tools"
-    shutil.copytree(ROOT / "firecracker/build", copied)
+    shutil.copytree(Path(args[0]).parent, copied)
     args[0] = str(copied / Path(args[0]).name)
     ready = tmp_path / "ready"
     env["BUILD_READY"] = str(ready)
@@ -519,6 +613,8 @@ def test_builder_specific_inputs(builder):
         assert invoke(builder) == {"changed": False}
         args.pop()
         env["FIRECRACKER_TAG"] = "v-other"
+        pins = Path(args[0]).with_name("kernel-inputs.sh")
+        pins.write_text(pins.read_text().replace("fc_tag=v1.17.0", "fc_tag=v-other"))
         assert invoke(builder) == {"changed": True}
         source = Path(args[2]) / "linux-6.1.186"
         source.mkdir(exist_ok=True)
@@ -577,7 +673,7 @@ def test_builder_specific_inputs(builder):
 def test_recipe_and_manifest_changes(builder, tmp_path):
     kind, args, _, output, _, _ = builder
     copied = tmp_path / "build tools"
-    shutil.copytree(ROOT / "firecracker/build", copied)
+    shutil.copytree(Path(args[0]).parent, copied)
     args[0] = str(copied / Path(args[0]).name)
     invoke(builder)
     recipe = copied / "recipes" / Path(args[0]).name
