@@ -76,11 +76,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute the short commit tag
-        id: tag
-        # promote.yml looks up sha-<first 7 hex chars>; the length must match here.
-        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-
       - name: Build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -88,7 +83,7 @@ jobs:
           build-args: CALCULATOR_VERSION=${{ github.sha }}
           load: true
           tags: |
-            ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
             ${{ env.IMAGE }}:main
           cache-from: type=gha
           # mode=max also caches the builder stage, which the final image does not contain.
@@ -96,10 +91,10 @@ jobs:
           cache-to: ${{ env.PUBLISH == 'true' && 'type=gha,mode=max' || '' }}
 
       - name: Smoke test the image
-        run: docker run --rm ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }} python -c "import app.main"
+        run: docker run --rm ${{ env.IMAGE }}:sha-${{ github.sha }} python -c "import app.main"
 
       - name: Push
         if: env.PUBLISH == 'true'
         run: |
-          docker push ${{ env.IMAGE }}:sha-${{ steps.tag.outputs.short }}
+          docker push ${{ env.IMAGE }}:sha-${{ github.sha }}
           docker push ${{ env.IMAGE }}:main

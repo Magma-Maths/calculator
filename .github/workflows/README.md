@@ -4,14 +4,13 @@ One line per workflow. Read the file itself for details.
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | push to `main`, PR | `test` runs the pytest suite. `build` builds the image on both, and pushes it to `ghcr.io/magma-maths/calculator` as `sha-<short>` and the moving `main` only on a push to `main` in Magma-Maths. A pull request builds without logging in to GHCR or writing the cache, so it needs no secrets and a broken Dockerfile fails before the merge. |
-| `promote.yml` | push of a `v*` tag (Magma-Maths only) | Retags the tagged commit's `sha-<short>` image as the version tag without rebuilding. Fails if the commit has no image; refuses if the version tag is already published. |
+| `ci.yml` | push to `main`, PR | `test` runs the pytest suite. `build` builds the image on both, and pushes it to `ghcr.io/magma-maths/calculator` as `sha-<full-commit>` and the moving `main` only on a push to `main` in Magma-Maths. A pull request builds without logging in to GHCR or writing the cache, so it needs no secrets and a broken Dockerfile fails before the merge. |
+| `promote.yml` | push of a `v*` tag (Magma-Maths only) | Retags the tagged commit's `sha-<full-commit>` image as the version tag without rebuilding. Fails if the commit has no image; refuses if the version tag is already published. |
 
-## The `sha-<short>` coupling
+## The commit-image coupling
 
-`ci.yml` tags each image with the first 7 hex characters of the commit, and
-`promote.yml` looks that tag up after peeling the git tag to its commit. The two
-files must agree on the length; change one, change the other.
+`ci.yml` tags each image with the full 40-character commit ID, and `promote.yml`
+looks up that exact image after peeling the git tag to its commit.
 
 The same coupling is why `ci.yml` has no path filters on its push trigger and
 why its concurrency group queues runs instead of cancelling them. A commit on
@@ -23,7 +22,7 @@ Queueing is `queue: max`, which holds up to 100 pending runs per group and
 starts them in order. It is not `cancel-in-progress`, which governs running runs
 only: under the default `queue: single` a newer run cancels the pending one
 regardless, so three commits pushed to `main` inside one run's duration would
-leave the middle one with no `sha-<short>` image. `cancel-in-progress` must
+leave the middle one with no `sha-<full-commit>` image. `cancel-in-progress` must
 therefore stay `false`, since GitHub rejects `queue: max` alongside
 `cancel-in-progress: true`, and `queue` is not documented to accept an
 expression, so the setting is uniform: runs on PR branches queue too rather than
