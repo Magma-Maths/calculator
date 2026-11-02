@@ -1,13 +1,16 @@
 # Stage 1: Python dependencies
-FROM python:3.12-slim AS builder
+# python:3.12-slim
+FROM python@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS builder
 WORKDIR /app
-RUN pip install poetry
+COPY poetry-requirements.txt ./
+RUN pip install --only-binary=:all: --require-hashes -r poetry-requirements.txt
 COPY pyproject.toml poetry.lock* ./
 RUN poetry config virtualenvs.create false && \
     poetry install --only main --no-root --no-interaction --no-ansi
 
 # Stage 2: Runtime
-FROM python:3.12-slim
+# python:3.12-slim
+FROM python@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 WORKDIR /app
 
 RUN useradd -m calculator
