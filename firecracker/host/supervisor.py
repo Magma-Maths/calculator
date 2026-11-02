@@ -22,6 +22,7 @@ log = logging.getLogger("magma-fc")
 GUEST_MAGMA_ROOT = "/opt/magma/current"
 STOP_GRACE = 8.0
 REPLY_WRITE_TIMEOUT = 10.0
+REFUSED_REQUEST_TIMEOUT = 1.0
 REQUEST_KEYS = {"code": str, "timeout": int, "cpu_timeout": int, "output_bytes": int}
 
 
@@ -495,7 +496,19 @@ async def serve(runner: Runner, path: str, group: str | None):
         nonlocal active
         if active >= max_connections:
             writer.write(protocol.pack(_error("busy", "too many connections")))
-            writer.close()
+            # Keep the request writable until the client can read the busy reply.
+            try:
+                async with asyncio.timeout(REFUSED_REQUEST_TIMEOUT):
+                    remaining = 4 + protocol.MAX_REQUEST_BYTES
+                    while remaining:
+                        chunk = await reader.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+            except (asyncio.TimeoutError, OSError):
+                pass
+            finally:
+                writer.close()
             return
         active += 1
         try:
