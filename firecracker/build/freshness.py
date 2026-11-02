@@ -62,8 +62,8 @@ def fingerprint(kind, paths):
     inputs = [digest(Path(__file__)), digest(recipe), digest(wrapper)]
     if kind == "kernel":
         inputs.extend([digest(BUILD / "kernel-inputs.sh"),
-                       os.environ.get("KERNEL_VERSION", "6.1.186"),
-                       os.environ.get("FIRECRACKER_TAG", "v1.17.0"),
+                       os.environ.get("KERNEL_VERSION"),
+                       os.environ.get("FIRECRACKER_TAG"),
                        digest(paths[2]) if len(paths) == 3 else None])
     elif kind == "rootfs":
         inputs.extend([digest(BUILD / "rootfs-files.tsv"),

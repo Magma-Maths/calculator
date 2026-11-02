@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import lzma
 import os
@@ -169,6 +170,35 @@ def test_kernel_rejects_unpinned_versions(builder, version):
     assert "must match reviewed" in result.stderr
     assert not output.exists()
     assert not count.exists()
+
+
+@pytest.mark.parametrize("builder", ["kernel"], indirect=True)
+def test_kernel_rejects_stale_tag_override_after_pin_update(builder):
+    _, args, env, output, _, count = builder
+    pins = Path(args[0]).with_name("kernel-inputs.sh")
+    updated_pins = pins.read_text().replace("fc_tag=v1.17.0", "fc_tag=v1.16.0")
+    pins.write_text(
+        re.sub(
+            r"config_sha256=.{64}",
+            "config_sha256=" + hashlib.sha256(KERNEL_CONFIG.encode()).hexdigest(),
+            updated_pins,
+        )
+    )
+    env.pop("FIRECRACKER_TAG", None)
+    assert invoke(builder) == {"changed": True}
+    stamp = Path(str(output) + ".build-stamp.json")
+    before = output.read_bytes(), stamp.read_bytes()
+
+    env["FIRECRACKER_TAG"] = "v1.17.0"
+    result = invoke(builder, ok=False)
+    assert "must match reviewed" in result.stderr
+    assert (output.read_bytes(), stamp.read_bytes()) == before
+    assert count.read_text().splitlines() == ["build"]
+
+    env.pop("FIRECRACKER_TAG")
+    assert invoke(builder) == {"changed": False}
+    assert (output.read_bytes(), stamp.read_bytes()) == before
+    assert count.read_text().splitlines() == ["build"]
 
 
 @pytest.mark.parametrize("builder", ["kernel"], indirect=True)
