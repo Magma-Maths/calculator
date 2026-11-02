@@ -9,6 +9,7 @@ extra_config=${3:-}
 if [ -n "$extra_config" ]; then
     extra_config=$(realpath -e "$extra_config")
 fi
+# shellcheck source=firecracker/build/kernel-inputs.sh
 source "$(dirname "$(readlink -f "$0")")/../kernel-inputs.sh"
 if [ "${KERNEL_VERSION:-$kver}" != "$kver" ] || [ "${FIRECRACKER_TAG:-$fc_tag}" != "$fc_tag" ]; then
     echo "KERNEL_VERSION and FIRECRACKER_TAG must match reviewed kernel-inputs.sh versions" >&2

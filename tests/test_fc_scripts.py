@@ -41,7 +41,7 @@ def test_script_parses(script):
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
 @pytest.mark.parametrize("script", SCRIPTS, ids=[s.name for s in SCRIPTS])
 def test_shellcheck(script):
-    subprocess.run(["shellcheck", "-S", "warning", str(script)], check=True)
+    subprocess.run(["shellcheck", "-x", "-S", "warning", str(script)], check=True)
 
 
 def test_init_mount_targets_exist_in_rootfs_or_are_standard():
