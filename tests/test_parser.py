@@ -19,6 +19,15 @@ def test_parse_simple_output():
     assert result.warnings == []
 
 
+def test_parse_backslash_wrapped_footer():
+    # Captured from Magma V2.29-10 with SetColumns(14); print 42;.
+    rest = "42\n\nTotal time: \n0.000 seconds\\\n, Total memory\nusage: 32.09M\\\nB\n"
+    result = parse_magma_output(SAMPLE_BANNER + SAMPLE_QUIT + rest, max_output_bytes=20480)
+    assert result.stdout == "42\n"
+    assert result.time_sec == 0.0
+    assert result.memory == "32.09MB"
+
+
 def test_parse_extracts_version_variants():
     stdout = "Magma V2.28     Fri Jan 31 2026 [Seed = 999]\nquit.\nok\nTotal time: 1.000 seconds, Total memory usage: 5.00MB\n"
     result = parse_magma_output(stdout, max_output_bytes=20480)

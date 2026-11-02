@@ -20,6 +20,7 @@ TRUNCATION_WARNING = "The output is too long and has been truncated."
 
 _RE_VERSION = re.compile(r"Magma V(\d+\.\d+(-[A-Z]*\d+)?)")
 _RE_SEED = re.compile(r"\[Seed = (\d+)\]")
+_RE_CONTINUATION = re.compile(r"\\\n")
 _RE_FOOTER = re.compile(
     r"^Total[ \t\n]+time:[ \t\n]+(?P<time>\d+\.\d+)[ \t\n]+seconds,"
     r"[ \t\n]+Total[ \t\n]+memory[ \t\n]+usage:[ \t\n]+"
@@ -53,9 +54,15 @@ def parse_magma_output(stdout: str, max_output_bytes: int) -> ParseResult:
     _extract_banner(banner, result)
 
     # Truncation can remove the real footer and leave a user's matching line.
-    footer_match = _RE_FOOTER.search(rest)
+    footer_match = _RE_FOOTER.search(_RE_CONTINUATION.sub("", rest))
     if footer_match:
-        body = rest[:footer_match.start()]
+        # Match without continuations, but preserve the body at its raw offsets.
+        footer_start = footer_match.start()
+        for continuation in _RE_CONTINUATION.finditer(rest):
+            if continuation.start() > footer_start:
+                break
+            footer_start += len(continuation.group())
+        body = rest[:footer_start]
         result.time_sec = float(footer_match.group("time"))
         result.memory = footer_match.group("memory")
     else:
