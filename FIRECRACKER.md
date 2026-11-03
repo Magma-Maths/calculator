@@ -325,7 +325,7 @@ Idle quarantine logs `idle <slot> quarantined (N free, N quarantined)`.
 | Stop grace | `TimeoutStopSec=5`, then supervisor cgroup drain for up to 8 seconds. |
 | Per-job limits | Request `timeout`, `cpu_timeout`, and `output_bytes`, from API settings `MAGMA_TIMEOUT`, `MAGMA_CPU_TIMEOUT`, and `MAGMA_OUTPUT_KB`. |
 | Supervisor timeout ceiling | `max_timeout`, default 300; larger wall or CPU timeout requests are rejected as `bad_request` with `timeout too large`. |
-| API connections | `max_connections`, default `2 * slots + 2`, counting request reads, jobs, and reply writes. Extra connections receive `busy`. |
+| API connections | `max_connections`, default `2 * slots + 2`, counting request reads, jobs, and reply writes. Extra connections receive `busy` and are not counted; they remain open for up to one second while their requests are discarded. |
 
 The unit memory limit covers the jailed process tree, including the VMM's
 allocation for guest RAM. It is separate from the guest's configured RAM.

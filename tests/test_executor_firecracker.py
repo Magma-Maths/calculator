@@ -403,6 +403,73 @@ def test_main_returns_503_on_busy(tmp_path, monkeypatch):
     assert events() == [("start", None, None), ("end", 503, "busy")]
 
 
+@pytest.mark.parametrize("loop_kind", ["asyncio", "uvloop"])
+@pytest.mark.parametrize("code", ["1;", "\x01" * 40_000], ids=["small", "large-frame"])
+def test_main_preserves_busy_reply_before_request_write(tmp_path, monkeypatch, loop_kind, code):
+    import threading
+    import httpx
+    from app import main as app_main
+    from firecracker.host import supervisor
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(app_main, "settings", settings)
+    events = _usage_events(tmp_path, monkeypatch)
+    runner = supervisor.Runner({
+        "slots": [], "max_connections": 0,
+        "images": {"kernel": "unused", "rootfs": "unused", "magma": "unused"},
+    })
+    loop = asyncio.new_event_loop()
+    server = loop.run_until_complete(supervisor.serve(runner, settings.supervisor_socket, None))
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    busy_sent = threading.Event()
+    pack = protocol.pack
+    write_frame = protocol.write_frame
+
+    def pack_reply(obj):
+        frame = pack(obj)
+        if obj.get("error") == "busy":
+            asyncio.get_running_loop().call_soon(busy_sent.set)
+        return frame
+
+    async def write_after_busy(writer, obj):
+        if "code" in obj:
+            # Block the API loop so its reply task cannot run before the write.
+            assert busy_sent.wait(2), "supervisor did not send busy"
+        await write_frame(writer, obj)
+
+    monkeypatch.setattr(protocol, "pack", pack_reply)
+    monkeypatch.setattr(protocol, "write_frame", write_after_busy)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app_main.app), base_url="http://test") as client:
+            return await client.post("/execute", json={"code": code})
+
+    async def stop():
+        server.close()
+        await server.wait_closed()
+        pending = asyncio.all_tasks() - {asyncio.current_task()}
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        if loop_kind == "uvloop":
+            import uvloop
+            response = uvloop.run(run())
+        else:
+            response = asyncio.run(run())
+    finally:
+        asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "All execution slots busy"}
+    assert events() == [("start", None, None), ("end", 503, "busy")]
+
+
 def test_main_reports_truncation_from_the_worker(tmp_path, monkeypatch):
     import threading
     from fastapi.testclient import TestClient

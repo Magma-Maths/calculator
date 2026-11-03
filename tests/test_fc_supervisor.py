@@ -435,6 +435,45 @@ def test_connections_beyond_the_cap_are_refused(config):
     assert host.calls == []
 
 
+@pytest.mark.parametrize("send_limit", [False, True], ids=["trickle-timeout", "byte-limit"])
+def test_refused_connections_close_after_bounded_discard(config, monkeypatch, send_limit):
+    config["max_connections"] = 0
+    monkeypatch.setattr(supervisor, "REFUSED_REQUEST_TIMEOUT", 10 if send_limit else 0.3, raising=False)
+    host = FakeHost(config["jail_base"])
+
+    async def run():
+        runner = supervisor.Runner(config, systemctl=host.systemctl, cgroup_populated=host.cgroup_populated)
+        server = await supervisor.serve(runner, config["socket"], group=None)
+        reader, writer = await asyncio.open_unix_connection(config["socket"])
+        trickle_task = None
+
+        async def trickle():
+            while True:
+                writer.write(b"x")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+
+        try:
+            reply = await protocol.read_frame(reader, protocol.MAX_REPLY_BYTES)
+            assert reply["error"] == "busy"
+            if send_limit:
+                writer.write(b"x" * (4 + protocol.MAX_REQUEST_BYTES))
+                await writer.drain()
+            else:
+                trickle_task = asyncio.create_task(trickle())
+            assert await asyncio.wait_for(reader.read(), timeout=1) == b""
+        finally:
+            if trickle_task is not None:
+                trickle_task.cancel()
+                await asyncio.gather(trickle_task, return_exceptions=True)
+            await protocol.close_writer(writer)
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+    assert host.calls == []
+
+
 def test_reply_that_overflows_the_frame_once_escaped_is_truncated(config, monkeypatch):
     monkeypatch.setattr(protocol, "MAX_REPLY_BYTES", 64 * 1024)
     # A guest may send raw UTF-8; the host re-encodes it with each "é" as \u00e9.
