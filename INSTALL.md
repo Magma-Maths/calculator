@@ -76,9 +76,11 @@ operator notes.
    chmod 0640 /srv/magma-fc/images/{vmlinux,rootfs.ext4,magma.ext4}
    ```
 
-   The kernel script defaults to Linux 6.1.186 with Firecracker v1.17.0's
-   guest configuration. `KERNEL_VERSION` and `FIRECRACKER_TAG` override those
-   inputs. Its second argument selects a build directory, defaulting to
+   The kernel script verifies Linux 6.1.186 and Firecracker v1.17.0's
+   guest configuration against the SHA-256 digests in `firecracker/build/kernel-inputs.sh`.
+   Update each version and digest together after reviewing the upstream input.
+   `KERNEL_VERSION` and `FIRECRACKER_TAG`, when set, must match the reviewed pins.
+   Its second argument selects a build directory, defaulting to
    `/var/tmp/magma-fc-kernel`. The Magma image is mounted read-only at
    `/opt/magma/current` in the guest.
 

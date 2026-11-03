@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,18 @@ import tarfile
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+KERNEL_CONFIG = "CONFIG_SECCOMP_FILTER=y\nCONFIG_AUDIT=y\n"
+
+
+def pinned_kernel_builder(directory, archive):
+    build = directory / "pinned build tools"
+    shutil.copytree(ROOT / "firecracker/build", build)
+    (build / "kernel-inputs.sh").write_text(
+        "kver=6.1.186\nfc_tag=v1.17.0\n"
+        f"kernel_sha256={hashlib.sha256(archive.read_bytes()).hexdigest()}\n"
+        f"config_sha256={hashlib.sha256(KERNEL_CONFIG.encode()).hexdigest()}\n"
+    )
+    return build / "build-kernel.sh"
 
 
 def executable(path, text):
@@ -82,7 +95,7 @@ def test_kernel_applies_optional_fragment(tmp_path, tools, extra, applied):
     work = tmp_path / "build"
     source = work / "linux-6.1.186"
     source.mkdir(parents=True)
-    executable(directory / "curl", 'echo "CONFIG_SECCOMP_FILTER=y" > .config\necho "CONFIG_AUDIT=y" >> .config\n')
+    executable(directory / "curl", 'printf "CONFIG_SECCOMP_FILTER=y\\nCONFIG_AUDIT=y\\n" > "${@: -1}"\n')
     executable(source / "scripts/config", 'if [ "$1" = --enable ]; then echo "$2=y" >> .config; fi\n')
     executable(source / "scripts/kconfig/merge_config.sh", 'test "$1" = -m\ncat "$3" >> "$2"\n')
     executable(directory / "make", 'if [ "${DROP_FEATURE:-0}" = 1 ]; then sed -i "/CONFIG_SITE_FEATURE/d" .config; fi\nif [ "$1" != olddefconfig ]; then cp .config vmlinux; fi\n')
@@ -92,7 +105,8 @@ def test_kernel_applies_optional_fragment(tmp_path, tools, extra, applied):
     fragment = tmp_path / "extra.config"
     fragment.write_text("CONFIG_SITE_FEATURE=y\n")
     out = tmp_path / "vmlinux"
-    args = [str(ROOT / "firecracker/build/build-kernel.sh"), str(out), str(work)]
+    script = pinned_kernel_builder(tmp_path, work / "linux-6.1.186.tar.xz")
+    args = [str(script), str(out), str(work)]
     if extra:
         args.append("extra.config")
     result = subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)

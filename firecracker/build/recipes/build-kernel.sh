@@ -9,23 +9,39 @@ extra_config=${3:-}
 if [ -n "$extra_config" ]; then
     extra_config=$(realpath -e "$extra_config")
 fi
-kver=${KERNEL_VERSION:-6.1.186}
-fc_tag=${FIRECRACKER_TAG:-v1.17.0}
+# shellcheck source=firecracker/build/kernel-inputs.sh
+source "$(dirname "$(readlink -f "$0")")/../kernel-inputs.sh"
+if [ "${KERNEL_VERSION:-$kver}" != "$kver" ] || [ "${FIRECRACKER_TAG:-$fc_tag}" != "$fc_tag" ]; then
+    echo "KERNEL_VERSION and FIRECRACKER_TAG must match reviewed kernel-inputs.sh versions" >&2
+    exit 1
+fi
 config_url="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${fc_tag}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
+config="microvm-kernel-ci-x86_64-6.1-${fc_tag}.config"
 tarball="linux-${kver}.tar.xz"
 src_url="https://cdn.kernel.org/pub/linux/kernel/v6.x/${tarball}"
 build=
-trap 'rm -f "$work/$tarball.part"; if [ -n "$build" ]; then rm -rf "$build"; fi' EXIT
+trap 'rm -f "$work/$tarball.part" "$work/$config.part"; if [ -n "$build" ]; then rm -rf "$build"; fi' EXIT
+
+verified_input() {
+    local file=$2
+    if [ ! -f "$file" ]; then
+        file=$2.part
+        curl -fsSL "$1" -o "$file"
+    fi
+    printf '%s  %s\n' "$3" "$file" | sha256sum --check >&2
+    if [ "$file" != "$2" ]; then
+        mv "$file" "$2"
+    fi
+}
 
 mkdir -p "$work"
 cd "$work"
-if [ ! -f "$tarball" ]; then
-    curl -fsSL -o "$tarball.part" "$src_url" && mv "$tarball.part" "$tarball"
-fi
+verified_input "$src_url" "$tarball" "$kernel_sha256"
+verified_input "$config_url" "$config" "$config_sha256"
 build=$(mktemp -d "$work/.magma-fc-kernel-source-XXXXXX")
 tar -xf "$tarball" -C "$build"
+cp "$config" "$build/linux-${kver}/.config"
 cd "$build/linux-${kver}"
-curl -fsSL "$config_url" -o .config
 if [ -n "$extra_config" ]; then
     scripts/kconfig/merge_config.sh -m .config "$extra_config"
 fi

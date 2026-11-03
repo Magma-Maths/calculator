@@ -200,12 +200,15 @@ A failed build exits nonzero and keeps the previous image.
 
 Pass `--force` before the paths after toolchain updates, or after editing an
 installed Magma tree in place. Also use it for new guest packages from the
-Debian repository, or a change published under the same remote version or tag.
+Debian repository.
 Keep each image's `.build-stamp.json` and `.build.lock` files beside it.
 
 `build-kernel.sh` fetches Firecracker's CI kernel configuration and builds
-`vmlinux`. It needs a kernel build toolchain. Defaults are Linux 6.1.186
-and Firecracker v1.17.0; `KERNEL_VERSION` and `FIRECRACKER_TAG` override them.
+`vmlinux`. It needs a kernel build toolchain. `firecracker/build/kernel-inputs.sh`
+pins Linux 6.1.186 and Firecracker v1.17.0's configuration with their SHA-256 digests.
+The script verifies downloaded and cached files before extraction, including with `--force`.
+Update each version and digest together after reviewing the upstream input.
+`KERNEL_VERSION` and `FIRECRACKER_TAG`, when set, must match the reviewed pins.
 The second argument is a build directory, default `/var/tmp/magma-fc-kernel`.
 An optional third argument supplies an extra kernel configuration fragment.
 The build fails if a requested setting is absent from the resolved config.
