@@ -21,7 +21,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Resolve the tag to its commit
         id: rev
@@ -29,10 +29,9 @@ jobs:
         run: |
           commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
-          echo "short=${commit:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -40,7 +39,7 @@ jobs:
 
       - name: Retag the commit's image as ${{ github.ref_name }}
         env:
-          SOURCE: ${{ env.IMAGE }}:sha-${{ steps.rev.outputs.short }}
+          SOURCE: ${{ env.IMAGE }}:sha-${{ steps.rev.outputs.commit }}
           TARGET: ${{ env.IMAGE }}:${{ github.ref_name }}
           COMMIT: ${{ steps.rev.outputs.commit }}
         run: |
